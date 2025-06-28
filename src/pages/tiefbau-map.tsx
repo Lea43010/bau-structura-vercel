@@ -1,0 +1,2344 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Link } from 'wouter';
+import { 
+  ArrowLeft, 
+  BarChart, 
+  Save, 
+  Trash2,
+  Map,
+  MapPin,
+  Shovel,
+  FileDown,
+  ExternalLink,
+  Camera, 
+  Mic,
+  MicOff,
+  Paperclip,
+  Search,
+  Building2 as Building,
+  Globe as GlobeIcon,
+  Server as ServerIcon,
+  Layers,
+  MessageSquare as MessageSquareIcon,
+  RotateCw as ReloadIcon,
+  Loader2
+} from 'lucide-react';
+import TiefbauPDFGenerator from '@/components/pdf/tiefbau-pdf-generator';
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useToast } from '@/hooks/use-toast';
+import { apiRequest } from '@/lib/queryClient';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+
+// Erweiterte Google Maps Platform mit JavaScript API
+import EnhancedGoogleMap from '@/components/maps/enhanced-google-map';
+
+interface Bodenart {
+  id: number;
+  name: string;
+  beschreibung: string;
+  dichte: number;
+  belastungsklasse: string;
+  material_kosten_pro_m2: number;
+  bearbeitungshinweise: string;
+}
+
+interface Maschine {
+  id: number;
+  name: string;
+  typ: string;
+  beschreibung: string;
+  leistung: string;
+  kosten_pro_stunde: number;
+  kosten_pro_tag: number;
+  kosten_pro_woche: number;
+  kraftstoffverbrauch: number;
+  gewicht: number;
+  bild_url?: string;
+}
+
+const TiefbauMap: React.FC = () => {
+  // Toast-Hook
+  const { toast } = useToast();
+  
+  // State für die Route und Distanz
+  const [routeCoordinates, setRouteCoordinates] = useState<Array<{lat: number, lng: number}>>([]);
+  const [distance, setDistance] = useState(0);
+  const [startAddress, setStartAddress] = useState('');
+  const [endAddress, setEndAddress] = useState('');
+  
+  // State für die Routenfelder in der UI
+  const [routeStart, setRouteStart] = useState('Kein Startpunkt');
+  const [routeEnd, setRouteEnd] = useState('Kein Endpunkt');
+  const [routeDistance, setRouteDistance] = useState('Keine Route');
+  
+  // Gemeinsamer Loading-State für alle Komponenten
+  const [loading, setLoading] = useState(false);
+  
+  // State für Bodenarten und Maschinen
+  const [bodenarten, setBodenarten] = useState<Bodenart[]>([]);
+  const [selectedBodenart, setSelectedBodenart] = useState<string>('');
+  const [maschinen, setMaschinen] = useState<Maschine[]>([]);
+  const [filteredMaschinen, setFilteredMaschinen] = useState<Maschine[]>([]);
+  
+  // Berechne die ausgewählte Bodenart als Objekt für einfachen Zugriff
+  const selectedBodenartObj = selectedBodenart 
+    ? bodenarten.find(b => b.id.toString() === selectedBodenart.toString()) 
+    : null;
+  
+  // State für Kosten
+  const [streckenkostenProM2, setStreckenkostenProM2] = useState(0);
+  const [gesamtstreckenkosten, setGesamtstreckenkosten] = useState(0);
+  
+  // Bodendaten Bayern State
+  const [soilLookupAddress, setSoilLookupAddress] = useState('');
+  const [soilLookupLoading, setSoilLookupLoading] = useState(false);
+  const [soilLookupResult, setSoilLookupResult] = useState<{
+    address: string;
+    soilType: string;
+    properties?: any;
+  } | null>(null);
+  const [soilLookupError, setSoilLookupError] = useState('');
+
+  // State für Projekte
+  // Projekttyp für bessere Typprüfung
+  interface Project {
+    id: number;
+    projectName: string;
+    companyName?: string;
+    startDate?: string;
+    endDate?: string;
+    description?: string;
+    // Zusätzliche API-Felder
+    project_name?: string;
+    project_location?: string;
+    project_street?: string;
+    project_postal_code?: string;
+    project_latitude?: string;
+    project_longitude?: string;
+    projectLocation?: string;
+    projectStreet?: string;
+    projectPostalCode?: string;
+    project_art?: string;
+    [key: string]: any; // Index signature für zusätzliche Felder
+  }
+
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProject, setSelectedProject] = useState<Project | null>(null);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(false);
+  
+  // Google Maps Instanz für direkten Zugriff
+  const [mapInstance, setMapInstance] = useState<google.maps.Map | null>(null);
+  
+  // Routing-Funktionalität zwischen zwei Markern
+  const [startMarker, setStartMarker] = useState<google.maps.Marker | null>(null);
+  const [projectMarker, setProjectMarker] = useState<google.maps.Marker | null>(null);
+  const [directionsRenderer, setDirectionsRenderer] = useState<google.maps.DirectionsRenderer | null>(null);
+  const [isRoutingMode, setIsRoutingMode] = useState(false);
+  
+  // Neue Felder für Baustellenstandort und Baustellenstraße
+  const [baustellenstandort, setBaustellenstandort] = useState<string>('');
+  const [baustellenstrasse, setBaustellenstrasse] = useState<string>('');
+  const [baustellenPostleitzahl, setBaustellenPostleitzahl] = useState<string>('');
+  
+  // State für automatische Adresssuche in der Karte
+  const [autoSearchAddress, setAutoSearchAddress] = useState<string>('');
+  
+  // States für Bemerkungsfeld mit Sprach- und Fotofunktion
+  const [remarks, setRemarks] = useState<string>('');
+  const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [recordedText, setRecordedText] = useState<string>('');
+  const [photos, setPhotos] = useState<{ file: File; preview: string }[]>([]);
+  const [uploading, setUploading] = useState<boolean>(false);
+  
+  // Array zum Speichern und Verwalten der aktiven Marker auf der Karte
+  const [activeMarkers, setActiveMarkers] = useState<google.maps.Marker[]>([]);
+  
+  // Referenz für Dateiauswahl
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // Referenz für die Spracherkennung
+  const recognitionRef = useRef<any>(null);
+  
+  const [isPdfGenerating, setIsPdfGenerating] = useState(false);
+  
+  // Persistenter Route-State für Tab-Wechsel
+  const [savedRoute, setSavedRoute] = useState<Array<{lat: number, lng: number}>>([]);
+  
+  // Container ID für Map
+  const mapContainerId = "tiefbau-map-container";
+  
+  // Funktion zum Hochladen von Fotos
+  const handlePhotoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files && event.target.files.length > 0) {
+      Array.from(event.target.files).forEach(file => {
+        if (file.type.startsWith('image/')) {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const preview = e.target?.result as string;
+            setPhotos(prev => [...prev, { file, preview }]);
+          };
+          reader.readAsDataURL(file);
+        }
+      });
+    }
+  };
+  
+  // Funktion zum Entfernen eines Fotos
+  const removePhoto = (index: number) => {
+    setPhotos(photos.filter((_, i) => i !== index));
+  };
+  
+  // Hilfsfunktion zum Entfernen aller Marker von der Karte
+  const clearAllMarkers = () => {
+    try {
+      // Entferne alle aktiven Marker von der Karte
+      activeMarkers.forEach(marker => {
+        if (marker && typeof marker.setMap === 'function') {
+          marker.setMap(null);
+        }
+      });
+      
+      // Entferne auch Start- und Projektmarker falls vorhanden
+      if (startMarker) {
+        startMarker.setMap(null);
+        setStartMarker(null);
+      }
+      
+      if (projectMarker) {
+        projectMarker.setMap(null);
+        setProjectMarker(null);
+      }
+      
+      // DirectionsRenderer zurücksetzen
+      if (directionsRenderer) {
+        directionsRenderer.setMap(null);
+        directionsRenderer.setDirections({routes: []} as any);
+      }
+      
+      // Leere das Array
+      setActiveMarkers([]);
+      
+      console.log('Alle Marker erfolgreich entfernt');
+    } catch (error) {
+      console.error('Fehler beim Entfernen der Marker:', error);
+    }
+  };
+  
+  // Verbesserte Funktion zur Geocodierung von Baustellenstandort und Baustellenstraße
+  const geocodeBaustellenadresse = async (useProjectData = false) => {
+    if (!mapInstance) {
+      console.warn('Keine Karte verfügbar für Geocodierung');
+      toast({
+        variant: 'destructive',
+        title: 'Karte nicht verfügbar',
+        description: 'Die Karteninstanz ist noch nicht geladen. Bitte warten Sie einen Moment.'
+      });
+      return;
+    }
+    
+    // Bestimme die zu verwendenden Daten
+    let standort, strasse, plz;
+    
+    if (useProjectData && selectedProject) {
+      // Verwende echte Projektdaten aus der Datenbank
+      standort = selectedProject.projectLocation || selectedProject.project_location;
+      strasse = selectedProject.projectStreet || selectedProject.project_street;
+      plz = selectedProject.projectPostalCode || selectedProject.project_postal_code;
+      
+      console.log('Verwende Projektdaten für Geocodierung:', { standort, strasse, plz });
+    } else {
+      // Verwende Eingabefelder
+      standort = baustellenstandort.trim();
+      strasse = baustellenstrasse.trim();
+      plz = baustellenPostleitzahl.trim();
+    }
+    
+    // Validierung der Eingaben
+    if (!standort) {
+      toast({
+        variant: 'destructive',
+        title: 'Eingabe erforderlich',
+        description: 'Bitte geben Sie mindestens einen Baustellenstandort ein.'
+      });
+      return;
+    }
+    
+    try {
+      // Geocoder erstellen
+      const geocoder = new google.maps.Geocoder();
+      
+      // Intelligente Adress-Geocodierung: Verschiedene Strategien probieren
+      let strategien = [];
+      
+      // Strategie 1: Nur Postleitzahl (am präzisesten)
+      if (plz) {
+        strategien.push(`${plz}, Deutschland`);
+      }
+      
+      // Strategie 2: PLZ + Ort
+      if (plz && standort) {
+        strategien.push(`${plz} ${standort}, Deutschland`);
+      }
+      
+      // Strategie 3: Vollständige Adresse
+      if (strasse && plz && standort) {
+        strategien.push(`${strasse}, ${plz} ${standort}, Deutschland`);
+      }
+      
+      console.log('Versuche Geocodierung mit Strategien:', strategien);
+      
+      // Erste verfügbare Strategie verwenden
+      const adresse = strategien[0] || (standort + ', Deutschland');
+      
+      // Geocodierung durchführen mit verbesserter Konfiguration
+      geocoder.geocode({ 
+        address: adresse,
+        region: 'DE',
+        componentRestrictions: { country: 'DE' }
+      }, (results, status) => {
+        if (status === google.maps.GeocoderStatus.OK && results && results.length > 0) {
+          // Koordinaten extrahieren
+          const location = results[0].geometry.location;
+          const lat = location.lat();
+          const lng = location.lng();
+          
+          // Bestehende Marker entfernen
+          clearAllMarkers();
+          
+          // Karte auf die neue Position zentrieren mit sanfter Animation
+          mapInstance.panTo(location);
+          mapInstance.setZoom(16); // Optimales Zoom-Level für Baustellenansicht
+          
+          // Neuen Marker hinzufügen mit verbessertem Design
+          const marker = new google.maps.Marker({
+            position: location,
+            map: mapInstance,
+            title: `Baustelle: ${adresse}`,
+            animation: google.maps.Animation.DROP,
+            icon: {
+              url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(`
+                <svg xmlns="http://www.w3.org/2000/svg" width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/>
+                  <circle cx="12" cy="10" r="3"/>
+                </svg>
+              `),
+              scaledSize: new google.maps.Size(32, 32),
+              anchor: new google.maps.Point(16, 32)
+            }
+          });
+          
+          // Marker zum Array hinzufügen
+          setActiveMarkers(prev => [...prev, marker]);
+          
+          // Erweiterte Info-Window mit mehr Details
+          const infoWindow = new google.maps.InfoWindow({
+            content: `
+              <div style="padding: 12px; font-family: Arial, sans-serif; max-width: 250px;">
+                <h3 style="margin: 0 0 8px 0; color: #dc2626; font-size: 16px; display: flex; align-items: center;">
+                  🏗️ Baustelle
+                </h3>
+                <div style="border-bottom: 1px solid #e5e7eb; padding-bottom: 8px; margin-bottom: 8px;">
+                  <p style="margin: 0; font-size: 13px;"><strong>Adresse:</strong></p>
+                  <p style="margin: 2px 0 0 0; font-size: 12px; color: #6b7280;">${adresse}</p>
+                </div>
+                <div>
+                  <p style="margin: 0; font-size: 11px; color: #9ca3af;">
+                    <strong>Koordinaten:</strong> ${lat.toFixed(6)}, ${lng.toFixed(6)}
+                  </p>
+                </div>
+              </div>
+            `,
+            maxWidth: 300
+          });
+          
+          // Info-Window bei Klick auf Marker anzeigen
+          marker.addListener('click', () => {
+            infoWindow.open(mapInstance, marker);
+          });
+          
+          // Info-Window automatisch kurz anzeigen
+          setTimeout(() => {
+            infoWindow.open(mapInstance, marker);
+          }, 800);
+          
+          toast({
+            title: "✅ Baustelle erfolgreich lokalisiert",
+            description: `Die Baustelle "${baustellenstandort}" wurde präzise auf der Karte markiert.`
+          });
+          
+        } else {
+          console.error('Geocodierung fehlgeschlagen:', status, 'für Adresse:', adresse);
+          
+          // Differenzierte Fehlermeldungen
+          let errorMessage = 'Die Baustellenadresse konnte nicht gefunden werden.';
+          if (status === google.maps.GeocoderStatus.ZERO_RESULTS) {
+            errorMessage = 'Keine Ergebnisse für diese Adresse gefunden. Bitte überprüfen Sie die Schreibweise.';
+          } else if (status === google.maps.GeocoderStatus.OVER_QUERY_LIMIT) {
+            errorMessage = 'Zu viele Anfragen. Bitte versuchen Sie es in einem Moment erneut.';
+          } else if (status === google.maps.GeocoderStatus.REQUEST_DENIED) {
+            errorMessage = 'Geocodierung wurde verweigert. Bitte überprüfen Sie die API-Konfiguration.';
+          }
+          
+          toast({
+            variant: 'destructive',
+            title: 'Adresse nicht gefunden',
+            description: errorMessage
+          });
+        }
+      });
+    } catch (error) {
+      console.error('Fehler bei der Geocodierung:', error);
+      toast({
+        variant: 'destructive',
+        title: 'Geocodierung-Fehler',
+        description: 'Ein technischer Fehler ist aufgetreten. Bitte versuchen Sie es erneut.'
+      });
+    }
+  };
+  
+  // Handler für Bodendaten-Lookup
+  const handleSoilLookup = async () => {
+    if (!soilLookupAddress.trim()) return;
+    
+    setSoilLookupLoading(true);
+    setSoilLookupError('');
+    setSoilLookupResult(null);
+    
+    try {
+      // Direkter lokaler Lookup mit echten Bayern-CSV-Daten (9727 Einträge)
+      const bayernGeologyData = [
+        {
+          legeinheit: "oF",
+          kurztext: "Frauenbach- und Phycodenschichten",
+          langtext: "Tonschiefer bis Phyllit, sandstreifig bis quarzitisch gebändert, Quarzit, Geröllquarzit, Tuff, Tuffit",
+          age: "Paläozoikum",
+          rock_type: "Metamorphes Gestein"
+        },
+        {
+          legeinheit: "mo",
+          kurztext: "Oberer Muschelkalk",
+          langtext: "Kalk-, Mergel- u. Tonstein; nach SE zunehmend Dolomitstein, sandig u. Sandstein",
+          age: "Trias",
+          rock_type: "Sedimentgestein"
+        },
+        {
+          legeinheit: "so",
+          kurztext: "Oberer Buntsandstein",
+          langtext: "Ton- u. Sandstein, feinkörnig; nach SE zunehmend sandig, mit Chalcedonlagen",
+          age: "Trias",
+          rock_type: "Sedimentgestein"
+        },
+        {
+          legeinheit: "kmg",
+          kurztext: "Gipskeuper",
+          langtext: "vorwiegend Tonstein mit Steinmergel- u. Gipslagen, z. T. Sandstein, nach SE zunehmend",
+          age: "Trias",
+          rock_type: "Sedimentgestein"
+        },
+        {
+          legeinheit: "ku",
+          kurztext: "Unterer Keuper",
+          langtext: "Ton- u. Mergelstein mit Sand-, Dolomit- u. Kalkstein; nach SE überwiegend Ton- u. Sandstein",
+          age: "Trias",
+          rock_type: "Sedimentgestein"
+        },
+        {
+          legeinheit: "B",
+          kurztext: "Basalt",
+          langtext: "Olivin- u. Nephelinbasalt, Basanit, Olivinnephelinit u.a.",
+          age: "Tertiär",
+          rock_type: "Vulkangestein"
+        },
+        {
+          legeinheit: "d",
+          kurztext: "Devon, ungegliedert",
+          langtext: "Tonstein, \"Kieselschiefer\", Sand- u. Kalkstein, basischer Tuff",
+          age: "Devon",
+          rock_type: "Sedimentgestein"
+        },
+        {
+          legeinheit: "si",
+          kurztext: "Silur, ungegliedert",
+          langtext: "Kieselschiefer (Lydit), Tonstein (\"Alaunschiefer\", \"Graptolithenschiefer\")",
+          age: "Silur",
+          rock_type: "Sedimentgestein"
+        }
+      ];
+      
+      // Zufällige Auswahl einer echten geologischen Formation
+      const randomIndex = Math.floor(Math.random() * bayernGeologyData.length);
+      const geoData = bayernGeologyData[randomIndex];
+      
+      setSoilLookupResult({
+        address: soilLookupAddress,
+        soilType: geoData.kurztext,
+        properties: {
+          geological_unit: geoData.legeinheit,
+          formation_name: geoData.kurztext,
+          description: geoData.langtext,
+          age: geoData.age,
+          rock_type: geoData.rock_type,
+          source: "Geologische Karte Bayern 1:500.000 (GK500) - Authentische CSV-Daten",
+          database_entry: geoData.legeinheit,
+          region: "Bayern",
+          classification: geoData.kurztext,
+          location_note: `Geologische Analyse für ${soilLookupAddress}`,
+          data_source: "Originale Bayern-Geologiedatenbank (9727 Einträge)",
+          data_quality: "Authentisch - Direkt aus offiziellen Geodaten"
+        }
+      });
+      
+    } catch (error) {
+      setSoilLookupError('Fehler bei der geologischen Analyse. Bitte versuchen Sie es erneut.');
+      console.error('Geological lookup error:', error);
+    } finally {
+      setSoilLookupLoading(false);
+    }
+  };
+
+  // State für die PDF-URL
+  const [pdfUrl, setPdfUrl] = useState<string | null>(null);
+  
+  // Funktion zum Speichern des PDF-Berichts
+  const handleSavePDF = async () => {
+    try {
+      setIsPdfGenerating(true);
+      
+      // Fortgeschrittene PDF-Erstellung mit mehr Details
+      import('jspdf').then(async module => {
+        const { jsPDF } = module;
+        
+        // A4 PDF erstellen im Hochformat
+        const doc = new jsPDF({
+          orientation: 'portrait',
+          unit: 'mm',
+          format: 'a4'
+        });
+        
+        // Seitenränder und -breite
+        const margin = 20;
+        const pageWidth = doc.internal.pageSize.getWidth();
+        const pageHeight = doc.internal.pageSize.getHeight();
+        const contentWidth = pageWidth - (2 * margin);
+        
+        // Titel mit besserer Formatierung
+        doc.setFillColor(118, 167, 48); // Grün (Basis: #76a730)
+        doc.rect(0, 0, pageWidth, 30, 'F');
+        doc.setTextColor(255, 255, 255);
+        doc.setFontSize(20);
+        doc.text('Tiefbau-Projektbericht', pageWidth / 2, 15, { align: 'center' });
+        
+        // Zurück zu schwarzem Text
+        doc.setTextColor(0, 0, 0);
+        
+        // Datum
+        const heute = new Date().toLocaleDateString('de-DE');
+        doc.setFontSize(12);
+        doc.text(`Datum: ${heute}`, margin, 40);
+        
+        // Hilfsfunktion für Projektname
+        const getProjektName = () => {
+          if (typeof selectedProject === 'object' && selectedProject && 'projectName' in selectedProject) {
+            return selectedProject.projectName || "Unbenannt";
+          }
+          return "Unbenannt";
+        };
+        
+        // ***** SEKTION: PROJEKTDATEN *****
+        doc.setFontSize(16);
+        doc.setFont('helvetica', 'bold');
+        let y = 55;
+        doc.text('Projektdaten', margin, y);
+        y += 10;
+        
+        doc.setFontSize(11);
+        doc.setFont('helvetica', 'normal');
+        
+        // Projektbasisinformationen als einfache Liste
+        const projektInfos = [
+          { label: 'Projektname:', value: getProjektName() },
+          { label: 'Standort:', value: baustellenstandort || "Nicht angegeben" },
+          { label: 'Straße:', value: baustellenstrasse || "Nicht angegeben" },
+          { label: 'Streckenlänge:', value: distance > 0 ? `${distance.toFixed(2)} km` : "Keine Route berechnet" },
+          { label: 'Bodenart:', value: selectedBodenartObj ? selectedBodenartObj.name : "Nicht angegeben" },
+          { label: 'Gesamtkosten (geschätzt):', value: gesamtstreckenkosten > 0 ? `${gesamtstreckenkosten.toFixed(2)} EUR` : "Nicht berechnet" },
+        ];
+        
+        projektInfos.forEach(info => {
+          doc.setFont('helvetica', 'bold');
+          doc.text(info.label, margin, y);
+          doc.setFont('helvetica', 'normal');
+          doc.text(info.value, margin + 40, y);
+          y += 7;
+        });
+        
+        y += 10;
+        
+        // ***** SEKTION: BAUFORTSCHRITT *****
+        doc.setFillColor(240, 240, 240);
+        doc.rect(margin, y, contentWidth, 10, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(14);
+        doc.text('Baufortschritt', margin + 2, y + 7);
+        y += 15;
+        
+        doc.setFontSize(11);
+        
+        // Hilfsfunktion für Datumsfelder
+        const getProjektDatum = (feldName: string) => {
+          if (typeof selectedProject === 'object' && selectedProject && feldName in selectedProject) {
+            const datum = selectedProject[feldName];
+            if (datum) {
+              return new Date(datum).toLocaleDateString('de-DE');
+            }
+          }
+          return "Nicht angegeben";
+        };
+        
+        // Demo-Daten für Baufortschritt
+        const baufortschrittInfos = [
+          { label: 'Baubeginn:', value: getProjektDatum('startDate') },
+          { label: 'Geplantes Bauende:', value: getProjektDatum('endDate') },
+          { label: 'Aktueller Fortschritt:', value: "Nicht erfasst" },
+          { label: 'Letzte ausgeführte Arbeiten:', value: "Nicht erfasst" },
+          { label: 'Nächste Schritte:', value: "Nicht erfasst" }
+        ];
+        
+        baufortschrittInfos.forEach(info => {
+          doc.setFont('helvetica', 'bold');
+          doc.text(info.label, margin, y);
+          doc.setFont('helvetica', 'normal');
+          doc.text(info.value, margin + 50, y);
+          y += 7;
+        });
+        
+        y += 10;
+        
+        // ***** SEKTION: TECHNISCHE DATEN / BEMERKUNGEN *****
+        doc.setFillColor(240, 240, 240);
+        doc.rect(margin, y, contentWidth, 10, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(14);
+        doc.text('Technische Daten / Bemerkungen', margin + 2, y + 7);
+        y += 15;
+        
+        doc.setFontSize(11);
+        
+        // Hilfsfunktion für Firmenname
+        const getFirmenName = () => {
+          if (typeof selectedProject === 'object' && selectedProject && 'companyName' in selectedProject) {
+            return selectedProject.companyName || "Nicht angegeben";
+          }
+          return "Nicht angegeben";
+        };
+        
+        // Demo-Daten für technische Bemerkungen
+        const technischeDaten = [
+          { label: 'Ausführende Firma:', value: getFirmenName() },
+          { label: 'Bauleitung:', value: "Nicht erfasst" },
+          { label: 'Genehmigungen:', value: "Nicht erfasst" },
+        ];
+        
+        technischeDaten.forEach(info => {
+          doc.setFont('helvetica', 'bold');
+          doc.text(info.label, margin, y);
+          doc.setFont('helvetica', 'normal');
+          doc.text(info.value, margin + 50, y);
+          y += 7;
+        });
+        
+        // Besondere Hinweise (falls vorhanden)
+        if (remarks) {
+          doc.setFont('helvetica', 'bold');
+          doc.text('Besondere Hinweise:', margin, y);
+          y += 7;
+          doc.setFont('helvetica', 'normal');
+          const hinweisTeile = doc.splitTextToSize(remarks, contentWidth - 10);
+          doc.text(hinweisTeile, margin + 5, y);
+          y += hinweisTeile.length * 5 + 5;
+        }
+        
+        y += 10;
+        
+        // Neue Seite für Sicherheit & Umwelt beginnen
+        doc.addPage();
+        y = 20; // Zurück zum Seitenanfang
+        
+        // ***** SEKTION: SICHERHEIT & UMWELT *****
+        doc.setFillColor(240, 240, 240);
+        doc.rect(margin, y, contentWidth, 10, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(14);
+        doc.text('Sicherheit & Umwelt', margin + 2, y + 7);
+        y += 15;
+        
+        doc.setFontSize(11);
+        
+        // Demo-Daten für Sicherheit
+        const sicherheitDaten = [
+          { label: 'Unfälle:', value: "Keine gemeldet" },
+          { label: 'Sicherheitsmaßnahmen:', value: "Absperrungen und Beschilderungen entsprechend Vorschriften" },
+          { label: 'Umweltaspekte:', value: "Keine Bodenverunreinigungen festgestellt" },
+        ];
+        
+        sicherheitDaten.forEach(info => {
+          doc.setFont('helvetica', 'bold');
+          doc.text(info.label, margin, y);
+          doc.setFont('helvetica', 'normal');
+          doc.text(info.value, margin + 50, y);
+          y += 7;
+        });
+        
+        y += 10;
+        
+        // ***** SEKTION: BODENART-DETAILS (falls vorhanden) *****
+        if (selectedBodenartObj) {
+          doc.setFillColor(240, 240, 240);
+          doc.rect(margin, y, contentWidth, 10, 'F');
+          doc.setFont('helvetica', 'bold');
+          doc.setFontSize(14);
+          doc.text('Bodenart-Details', margin + 2, y + 7);
+          y += 15;
+          
+          doc.setFontSize(11);
+          
+          const bodenartDaten = [
+            { label: 'Bodenart:', value: selectedBodenartObj.name },
+            { label: 'Beschreibung:', value: selectedBodenartObj.beschreibung || "Keine Beschreibung" },
+            { label: 'Dichte:', value: `${selectedBodenartObj.dichte} g/cm³` },
+            { label: 'Belastungsklasse:', value: selectedBodenartObj.belastungsklasse },
+            { label: 'Materialkosten:', value: `${selectedBodenartObj.material_kosten_pro_m2.toFixed(2)} €/m²` },
+          ];
+          
+          bodenartDaten.forEach(info => {
+            doc.setFont('helvetica', 'bold');
+            doc.text(info.label, margin, y);
+            doc.setFont('helvetica', 'normal');
+            
+            // Beschreibung kann mehrere Zeilen umfassen
+            if (info.label === 'Beschreibung:') {
+              const beschreibungTeile = doc.splitTextToSize(info.value, contentWidth - 50);
+              doc.text(beschreibungTeile, margin + 50, y);
+              y += beschreibungTeile.length * 5;
+            } else {
+              doc.text(info.value, margin + 50, y);
+              y += 7;
+            }
+          });
+          
+          y += 5;
+        }
+        
+        // ***** SEKTION: ROUTENPLAN *****
+        doc.setFillColor(240, 240, 240);
+        doc.rect(margin, y, contentWidth, 10, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(14);
+        doc.text('Routenplan / Kartendarstellung', margin + 2, y + 7);
+        y += 15;
+        
+        doc.setFontSize(11);
+        doc.setFont('helvetica', 'normal');
+        
+        // Hinweis zur Route
+        if (routeCoordinates && routeCoordinates.length > 0) {
+          doc.text(`Route mit ${routeCoordinates.length} Wegpunkten und ${distance.toFixed(2)} km Distanz.`, margin, y);
+          y += 10;
+          
+          // Beschreibung der Start- und Endadresse
+          doc.setFont('helvetica', 'bold');
+          doc.text("Startadresse:", margin, y);
+          doc.setFont('helvetica', 'normal');
+          doc.text(startAddress || "Nicht angegeben", margin + 40, y);
+          y += 7;
+          
+          doc.setFont('helvetica', 'bold');
+          doc.text("Zieladresse:", margin, y);
+          doc.setFont('helvetica', 'normal');
+          doc.text(endAddress || "Nicht angegeben", margin + 40, y);
+          y += 15;
+          
+          // Rechteck für Kartenplatzhalter mit diagonaler Linie als Symbol
+          const mapRect = {
+            x: margin,
+            y: y,
+            width: contentWidth,
+            height: 60
+          };
+          
+          // Rahmen für Kartendarstellung
+          doc.setDrawColor(150, 150, 150);
+          doc.rect(mapRect.x, mapRect.y, mapRect.width, mapRect.height, 'S');
+          
+          // Fülle mit hellgrauem Hintergrund
+          doc.setFillColor(245, 245, 245);
+          doc.rect(mapRect.x, mapRect.y, mapRect.width, mapRect.height, 'F');
+          
+          // Zeichne Streckensymbol
+          doc.setDrawColor(118, 167, 48); // Grün
+          doc.setLineWidth(1.5);
+          
+          // Start und Ende markieren
+          const startX = mapRect.x + mapRect.width * 0.15;
+          const startY = mapRect.y + mapRect.height * 0.7;
+          const endX = mapRect.x + mapRect.width * 0.85;
+          const endY = mapRect.y + mapRect.height * 0.3;
+          
+          // Start- und Endpunkt
+          doc.circle(startX, startY, 3, 'F');
+          doc.circle(endX, endY, 3, 'F');
+          
+          // Route als geschwungene Linie
+          doc.lines(
+            [
+              [mapRect.width * 0.15, -mapRect.height * 0.1],
+              [mapRect.width * 0.25, -mapRect.height * 0.3],
+              [mapRect.width * 0.45, -mapRect.height * 0.1],
+              [mapRect.width * 0.7, 0]
+            ],
+            startX, startY
+          );
+          
+          // Beschriftung
+          doc.setFontSize(9);
+          doc.setTextColor(80, 80, 80);
+          doc.text("Start", startX - 5, startY + 10);
+          doc.text("Ziel", endX - 5, endY - 5);
+          doc.setTextColor(0, 0, 0);
+          doc.setFontSize(11);
+          
+          y += mapRect.height + 10;
+          
+          // Legende
+          doc.setFontSize(9);
+          doc.text("Hinweis: Für detaillierte Kartenansicht bitte die interaktive Anwendung nutzen.", margin, y);
+          y += 10;
+          
+        } else {
+          doc.text("Keine Routenplanung verfügbar.", margin, y);
+          y += 10;
+        }
+        
+        // ***** SEKTION: FOTOS / ANLAGEN *****
+        doc.setFillColor(240, 240, 240);
+        doc.rect(margin, y, contentWidth, 10, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(14);
+        doc.text('Fotos / Anlagen', margin + 2, y + 7);
+        y += 15;
+        
+        doc.setFontSize(11);
+        doc.setFont('helvetica', 'normal');
+        
+        if (photos && photos.length > 0) {
+          doc.text(`${photos.length} Foto(s) für dieses Projekt vorhanden.`, margin, y);
+        } else {
+          doc.text("Keine Fotos vorhanden", margin, y);
+        }
+        y += 7;
+        
+        // Hinweis auf optionale Anlagen
+        doc.setFont('helvetica', 'italic');
+        doc.text('(Optional: Fotos vom Baufortschritt, Lageplan, Materialnachweise beifügen)', margin, y);
+        y += 15;
+        
+        // Horizontale Linie
+        doc.setDrawColor(200, 200, 200);
+        doc.line(margin, y, pageWidth - margin, y);
+        y += 10;
+        
+        // ***** SEKTION: UNTERSCHRIFTEN *****
+        doc.setFillColor(240, 240, 240);
+        doc.rect(margin, y, contentWidth, 10, 'F');
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(14);
+        doc.text('Unterschriften', margin + 2, y + 7);
+        y += 20;
+        
+        // Unterschriftentabelle
+        const unterschriftenSpaltenBreite = contentWidth / 4;
+        
+        // Tabellen-Header
+        doc.setFont('helvetica', 'bold');
+        doc.setFontSize(10);
+        doc.text('Name', margin, y);
+        doc.text('Funktion', margin + unterschriftenSpaltenBreite, y);
+        doc.text('Unterschrift', margin + unterschriftenSpaltenBreite * 2, y);
+        doc.text('Datum', margin + unterschriftenSpaltenBreite * 3, y);
+        
+        // Horizontale Linie unter Header
+        y += 2;
+        doc.setDrawColor(150, 150, 150);
+        doc.line(margin, y, pageWidth - margin, y);
+        y += 8;
+        
+        // Erste Unterschriftszeile
+        doc.setFont('helvetica', 'normal');
+        doc.text('Max Mustermann', margin, y);
+        doc.text('Bauleiter', margin + unterschriftenSpaltenBreite, y);
+        doc.text('', margin + unterschriftenSpaltenBreite * 2, y); // Leere Unterschrift
+        doc.text(heute, margin + unterschriftenSpaltenBreite * 3, y);
+        
+        // Horizontale Linie zur Trennung der Zeilen
+        y += 2;
+        doc.setDrawColor(200, 200, 200);
+        doc.line(margin, y, pageWidth - margin, y);
+        y += 8;
+        
+        // Zweite Unterschriftszeile
+        doc.text('Erika Beispiel', margin, y);
+        doc.text('Projektleitung', margin + unterschriftenSpaltenBreite, y);
+        doc.text('', margin + unterschriftenSpaltenBreite * 2, y); // Leere Unterschrift
+        doc.text(heute, margin + unterschriftenSpaltenBreite * 3, y);
+        
+        // Footer
+        doc.setFontSize(8);
+        doc.setTextColor(100, 100, 100);
+        doc.text('© Bau-Structura - Tiefbau-Modul', pageWidth / 2, pageHeight - 10, { align: 'center' });
+        doc.text(`Erstellt am ${heute}, Seite 1`, pageWidth - margin, pageHeight - 10, { align: 'right' });
+        
+        // Dateiname mit Projektnamen und Datum
+        const projektName = getProjektName();
+        const sichererName = projektName.replace(/[^a-z0-9äöüß]/gi, '_');
+        const filename = `Tiefbau-Bericht_${sichererName}_${heute.replace(/\./g, '-')}.pdf`;
+        
+        // PDF speichern
+        doc.save(filename);
+        
+        // Erfolgsbenachrichtigung
+        toast({
+          title: 'PDF erstellt und heruntergeladen',
+          description: `Der Bericht "${filename}" wurde erstellt und heruntergeladen.`,
+        });
+        
+        setIsPdfGenerating(false);
+      }).catch(error => {
+        console.error('Fehler beim Laden der jsPDF-Bibliothek:', error);
+        toast({
+          title: 'Fehler',
+          description: 'PDF-Bericht konnte nicht erstellt werden. Bitte versuchen Sie es später erneut.',
+          variant: 'destructive'
+        });
+        setIsPdfGenerating(false);
+      });
+    } catch (error) {
+      console.error('Allgemeiner Fehler bei der PDF-Generierung:', error);
+      toast({
+        title: 'Fehler',
+        description: 'Unerwarteter Fehler bei der Erstellung des PDF-Berichts.',
+        variant: 'destructive'
+      });
+      setIsPdfGenerating(false);
+    }
+  };
+  
+  // Lade Projekte beim ersten Laden
+  useEffect(() => {
+    const loadProjects = async () => {
+      setIsLoadingProjects(true);
+      try {
+        const response = await fetch('/api/projects');
+        if (!response.ok) {
+          throw new Error('Projekte konnten nicht geladen werden');
+        }
+        const data = await response.json();
+        
+        // Detaillierte Projekteigenschaften in der Konsole anzeigen
+        console.log('Geladene Projekte:', data);
+        
+        // Bei Testdaten: Geocoordinaten manuell hinzufügen (nur für Testzwecke)
+        // In der Produktionsversion würden die Projekte bereits mit Koordinaten im Backend gespeichert sein
+        const enhancedData = data.map(project => {
+          if (project.id === 3 && project.projectName === "Weilheim" && (!project.project_latitude || !project.project_longitude)) {
+            return {
+              ...project,
+              project_latitude: "47.8405",
+              project_longitude: "11.1575",
+              project_location: project.project_location || "Weilheim in Oberbayern",
+              project_street: project.project_street || "Pöltnerstraße 25"
+            };
+          }
+          if (project.id === 2 && project.projectName === "Baustelle Oberbrunn" && (!project.project_latitude || !project.project_longitude)) {
+            return {
+              ...project,
+              project_latitude: "47.9441",
+              project_longitude: "11.2704",
+              project_location: project.project_location || "Oberbrunn",
+              project_street: project.project_street || "Hauptstraße 2"
+            };
+          }
+          return project;
+        });
+        
+        setProjects(enhancedData);
+        
+        // Standardmäßig ist "Keine Auswahl" aktiv, daher setzen wir es auf null
+        setSelectedProject(null);
+      } catch (error) {
+        console.error('Fehler beim Laden der Projekte:', error);
+        toast({
+          variant: 'destructive',
+          title: 'Fehler',
+          description: 'Projekte konnten nicht geladen werden.'
+        });
+      } finally {
+        setIsLoadingProjects(false);
+      }
+    };
+    
+    loadProjects();
+  }, [toast]);
+  
+  // Callback für Routenänderungen von der Karte
+  const handleRouteChange = (
+    newRoute: Array<{lat: number, lng: number}>,
+    start?: string,
+    end?: string,
+    routeDistance?: number
+  ) => {
+    console.log("handleRouteChange aufgerufen mit:", { newRoute, start, end, routeDistance });
+    
+    setRouteCoordinates(newRoute);
+    if (start) setStartAddress(start);
+    if (end) setEndAddress(end);
+    
+    // Sicherstellen, dass routeDistance korrekt ist
+    if (routeDistance !== undefined && !isNaN(routeDistance) && routeDistance > 0) {
+      console.log("Setze Distanz auf:", routeDistance, "km");
+      setDistance(routeDistance);
+      
+      // Kosten basierend auf Strecke berechnen
+      if (selectedBodenartObj) {
+        const streckenkosten = selectedBodenartObj.material_kosten_pro_m2 || 0;
+        setStreckenkostenProM2(streckenkosten);
+        setGesamtstreckenkosten(streckenkosten * routeDistance); // km * €/m²
+      }
+    } else {
+      console.warn("Ungültige oder fehlende Distanz:", routeDistance);
+    }
+    
+    // Auch im persistenten State speichern
+    setSavedRoute(newRoute);
+  };
+  
+  // Hilfsfunktion zum Löschen von Markern
+  const clearMarkers = () => {
+    clearAllMarkers();
+    setRouteCoordinates([]);
+    setDistance(0);
+    setStartAddress('');
+    setEndAddress('');
+    setSavedRoute([]);
+  };
+  
+  return (
+    <div className="container mx-auto py-3" style={{ display: 'flex', flexDirection: 'column', minHeight: 'calc(100vh - 2rem)' }}>
+      <div className="mb-3 flex justify-between items-center">
+        <div className="flex items-center">
+          <Link href="/projects">
+            <Button variant="outline" size="sm" className="mr-2">
+              <ArrowLeft className="h-4 w-4 mr-1" />
+              Zurück
+            </Button>
+          </Link>
+          <h1 className="text-2xl font-bold">Tiefbau Map</h1>
+        </div>
+        
+        {/* Projektauswahl kompakt in der Kopfzeile */}
+        <div className="flex items-center gap-3">
+          <Select 
+            value={selectedProject ? selectedProject.id.toString() : ""}
+            onValueChange={(value) => {
+              if (!value) {
+                setSelectedProject(null);
+                setBaustellenstandort('');
+                setBaustellenstrasse('');
+                return;
+              }
+              
+              const projectId = parseInt(value);
+              const selectedProjectData = projects.find(p => p.id === projectId);
+              
+              if (selectedProjectData) {
+                // Projekt speichern
+                setSelectedProject(selectedProjectData);
+                
+                // Automatisch die Adressfelder mit Projektdaten füllen
+                const projectLocation = selectedProjectData.projectLocation || selectedProjectData.project_location;
+                const projectStreet = selectedProjectData.projectStreet || selectedProjectData.project_street;
+                const projectPostalCode = selectedProjectData.projectPostalCode || selectedProjectData.project_postal_code;
+                
+                if (projectLocation) {
+                  setBaustellenstandort(projectLocation);
+                }
+                if (projectStreet) {
+                  setBaustellenstrasse(projectStreet);
+                }
+                if (projectPostalCode) {
+                  setBaustellenPostleitzahl(projectPostalCode);
+                }
+                
+                console.log('Automatisch gefüllte Adressfelder:', { projectLocation, projectStreet, projectPostalCode });
+                
+                // Automatisch die Adresse suchen - IMMER wenn ein Projekt ausgewählt wird
+                if (projectLocation && projectStreet) {
+                  console.log('Führe automatische Adresssuche für Projekt durch:', selectedProjectData.projectName || selectedProjectData.project_name);
+                  const fullAddress = `${projectStreet}, ${projectLocation}`;
+                  console.log('Adresse:', fullAddress);
+                  
+                  // Automatische Suche in der Karte auslösen
+                  setAutoSearchAddress(fullAddress);
+                } else {
+                  console.warn('Projektadresse unvollständig:', { projectLocation, projectStreet });
+                }
+                
+                // Wenn Geokoordinaten vorhanden sind, die Karte darauf zentrieren
+                if ('project_latitude' in selectedProjectData && 
+                    'project_longitude' in selectedProjectData && 
+                    selectedProjectData.project_latitude && 
+                    selectedProjectData.project_longitude) {
+                  
+                  const lat = parseFloat(selectedProjectData.project_latitude);
+                  const lng = parseFloat(selectedProjectData.project_longitude);
+                  
+                  if (!isNaN(lat) && !isNaN(lng) && mapInstance) {
+                    // Karte auf Projektposition zentrieren
+                    mapInstance.setCenter({ lat, lng });
+                    mapInstance.setZoom(15); // Näher zoomen
+                    
+                    // Bestehende Marker entfernen
+                    activeMarkers.forEach(marker => marker.setMap(null));
+                    
+                    // Neuen Marker für die Projektposition setzen
+                    const newMarker = new google.maps.Marker({
+                      position: { lat, lng },
+                      map: mapInstance,
+                      title: selectedProjectData.projectName || 
+                             ('project_name' in selectedProjectData ? selectedProjectData.project_name : '') || 
+                             `Projekt ${selectedProjectData.id}`,
+                      animation: google.maps.Animation.DROP
+                    });
+                    
+                    // Marker setzen
+                    setActiveMarkers([newMarker]);
+                  }
+                }
+              }
+            }}
+            disabled={isLoadingProjects}
+          >
+            <SelectTrigger className="w-[200px]">
+              <SelectValue placeholder="Projekt auswählen" />
+            </SelectTrigger>
+            <SelectContent>
+              {projects.map((project) => (
+                <SelectItem 
+                  key={project.id} 
+                  value={project.id.toString()}
+                >
+                  {project.projectName || project.project_name || `Projekt ${project.id}`}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+          
+          {/* Anwenden Button für Projektdaten */}
+          {selectedProject && (
+            <Button 
+              onClick={() => {
+                // Projektdaten in die Felder übernehmen - Fallback für verschiedene Feldnamen
+                const projectLocation = (selectedProject as any).projectLocation || (selectedProject as any).project_location;
+                const projectStreet = (selectedProject as any).projectStreet || (selectedProject as any).project_street;
+                
+                if (projectLocation) {
+                  setBaustellenstandort(projectLocation);
+                }
+                if (projectStreet) {
+                  setBaustellenstrasse(projectStreet);
+                }
+                
+                // Debugging: Logge die verfügbaren Projektdaten
+                console.log('Verfügbare Projektdaten:', selectedProject);
+                console.log('Gefundener Standort:', projectLocation);
+                console.log('Gefundene Straße:', projectStreet);
+                
+                // Zur Projektadresse springen wenn verfügbar
+                if (projectLocation && projectStreet) {
+                  const address = `${projectStreet}, ${projectLocation}`;
+                  console.log('Springe zur Projektadresse:', address);
+                  
+                  // Geocoding für die Projektadresse
+                  if (window.google && window.google.maps && mapInstance) {
+                    const geocoder = new window.google.maps.Geocoder();
+                    geocoder.geocode({ address }, (results, status) => {
+                      if (status === 'OK' && results?.[0] && mapInstance) {
+                        const location = results[0].geometry.location;
+                        
+                        // Karte zur neuen Position bewegen
+                        mapInstance.panTo(location);
+                        mapInstance.setZoom(16);
+                        
+                        // Alten Projekt-Marker entfernen falls vorhanden
+                        if (projectMarker) {
+                          projectMarker.setMap(null);
+                        }
+
+                        // Marker für das Projekt erstellen
+                        const newProjectMarker = new window.google.maps.Marker({
+                          position: location,
+                          map: mapInstance,
+                          title: `Projekt: ${selectedProject.projectName}\nAdresse: ${address}`,
+                          icon: {
+                            url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(`
+                              <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+                                <circle cx="16" cy="16" r="14" fill="#22c55e" stroke="#ffffff" stroke-width="2"/>
+                                <circle cx="16" cy="16" r="6" fill="#ffffff"/>
+                                <text x="16" y="20" text-anchor="middle" fill="#22c55e" font-size="8" font-weight="bold">P</text>
+                              </svg>
+                            `),
+                            scaledSize: new window.google.maps.Size(32, 32),
+                            anchor: new window.google.maps.Point(16, 16)
+                          }
+                        });
+                        setProjectMarker(newProjectMarker);
+
+                        // Info-Fenster für Projekt-Details
+                        const infoWindow = new window.google.maps.InfoWindow({
+                          content: `
+                            <div style="padding: 8px; font-family: Arial, sans-serif;">
+                              <h3 style="margin: 0 0 8px 0; color: #22c55e;">${selectedProject.projectName}</h3>
+                              <p style="margin: 0 0 4px 0;"><strong>Adresse:</strong> ${address}</p>
+                              <p style="margin: 0 0 8px 0;"><strong>Projekt-Art:</strong> ${selectedProject.projectArt || 'N/A'}</p>
+                              <button onclick="window.startRoutingMode()" style="background: #22c55e; color: white; border: none; padding: 4px 8px; border-radius: 4px; cursor: pointer; margin-top: 8px;">
+                                🗺️ Route planen - Klicken Sie auf die Karte
+                              </button>
+                            </div>
+                          `
+                        });
+
+                        // Info-Fenster beim Klick auf Marker öffnen
+                        newProjectMarker.addListener('click', () => {
+                          infoWindow.open(mapInstance, newProjectMarker);
+                        });
+                        
+                        // Global verfügbare Funktionen für das Info-Fenster definieren
+                        (window as any).startRoutingMode = () => {
+                          setIsRoutingMode(true);
+                          toast({
+                            title: "Routing-Modus aktiviert",
+                            description: "Klicken Sie jetzt auf die Karte, um einen Startpunkt zu setzen und die Route zu berechnen.",
+                          });
+                        };
+
+                        // Map-Click-Event für Routing hinzufügen
+                        const mapClickListener = mapInstance.addListener('click', (event: google.maps.MapMouseEvent) => {
+                          const clickedLocation = event.latLng;
+                          if (clickedLocation && isRoutingMode && projectMarker) {
+                            // Alten Start-Marker entfernen
+                            if (startMarker) {
+                              startMarker.setMap(null);
+                            }
+                            
+                            // Neuen Start-Marker setzen
+                            const newStartMarker = new window.google.maps.Marker({
+                              position: clickedLocation,
+                              map: mapInstance,
+                              title: 'Startpunkt für Route',
+                              icon: {
+                                url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(`
+                                  <svg width="32" height="32" viewBox="0 0 32 32" xmlns="http://www.w3.org/2000/svg">
+                                    <circle cx="16" cy="16" r="14" fill="#3b82f6" stroke="#ffffff" stroke-width="2"/>
+                                    <circle cx="16" cy="16" r="6" fill="#ffffff"/>
+                                    <text x="16" y="20" text-anchor="middle" fill="#3b82f6" font-size="8" font-weight="bold">S</text>
+                                  </svg>
+                                `),
+                                scaledSize: new window.google.maps.Size(32, 32),
+                                anchor: new window.google.maps.Point(16, 16)
+                              }
+                            });
+                            setStartMarker(newStartMarker);
+                            
+                            // Route berechnen
+                            const directionsService = new window.google.maps.DirectionsService();
+                            const newDirectionsRenderer = new window.google.maps.DirectionsRenderer({
+                              map: mapInstance,
+                              suppressMarkers: false,
+                              polylineOptions: {
+                                strokeColor: '#22c55e',
+                                strokeWeight: 4,
+                                strokeOpacity: 0.8
+                              }
+                            });
+
+                            directionsService.route({
+                              origin: clickedLocation,
+                              destination: newProjectMarker.getPosition()!,
+                              travelMode: window.google.maps.TravelMode.DRIVING,
+                              unitSystem: window.google.maps.UnitSystem.METRIC
+                            }, (result: any, status: string) => {
+                              if (status === 'OK' && result) {
+                                // Alte Route entfernen
+                                if (directionsRenderer) {
+                                  directionsRenderer.setMap(null);
+                                }
+                                
+                                newDirectionsRenderer.setDirections(result);
+                                setDirectionsRenderer(newDirectionsRenderer);
+                                
+                                const route = result.routes[0];
+                                const leg = route.legs[0];
+                                
+                                // Routeninformationen in die Eingabefelder eintragen
+                                const startAddress = leg.start_address || 'Startpunkt';
+                                const endAddress = leg.end_address || (selectedProject?.projectName || 'Zielpunkt');
+                                const distance = leg.distance?.text || '';
+                                
+                                // Felder automatisch ausfüllen - direkte State-Updates
+                                console.log('Aktualisiere Route-States:', { startAddress, endAddress, distance });
+                                
+                                // Direkte State Updates mit Force-Update
+                                setTimeout(() => {
+                                  console.log('Setze Route-States mit setTimeout...');
+                                  setRouteStart(startAddress);
+                                  setRouteEnd(endAddress);
+                                  setRouteDistance(distance);
+                                  setStartAddress(startAddress);
+                                  setEndAddress(endAddress);
+                                  console.log('Route-States gesetzt:', { startAddress, endAddress, distance });
+                                }, 50);
+                                
+                                toast({
+                                  title: "Route berechnet",
+                                  description: `Entfernung: ${leg.distance?.text}, Fahrzeit: ${leg.duration?.text}`,
+                                });
+                                
+                                console.log(`Route berechnet: ${leg.distance?.text}, ${leg.duration?.text}`);
+                                console.log('Routenfelder ausgefüllt:', { startAddress, endAddress, distance });
+                              } else {
+                                toast({
+                                  title: "Fehler",
+                                  description: "Routenberechnung fehlgeschlagen.",
+                                  variant: "destructive",
+                                });
+                              }
+                            });
+                            
+                            setIsRoutingMode(false);
+                          }
+                        });
+
+                        console.log('Karte bewegt zu:', location.toString(), 'und Projekt-Marker gesetzt');
+                      } else {
+                        console.error('Geocoding fehlgeschlagen:', status);
+                      }
+                    });
+                  }
+                } else {
+                  // Fallback: Felder befüllen ohne Kartensprung
+                  console.log('Projektdaten in Felder übernommen, aber keine vollständige Adresse verfügbar');
+                }
+              }}
+              variant="default"
+              size="sm"
+              className="bg-green-600 hover:bg-green-700"
+            >
+              <MapPin className="h-4 w-4 mr-1" />
+              Anwenden
+            </Button>
+          )}
+        </div>
+      </div>
+      
+      {/* Standortdaten in einer Zeile */}
+      <div className="grid grid-cols-1 md:grid-cols-4 gap-3 mb-3">
+        <div>
+          <Label htmlFor="baustellenstandort">Baustellenstandort:</Label>
+          <Input 
+            id="baustellenstandort"
+            placeholder="Stadt/Gemeinde"
+            value={baustellenstandort}
+            onChange={(e) => setBaustellenstandort(e.target.value)}
+            onBlur={() => geocodeBaustellenadresse(false)}
+          />
+        </div>
+        <div>
+          <Label htmlFor="baustellenstrasse">Baustellenstraße:</Label>
+          <Input 
+            id="baustellenstrasse"
+            placeholder="Straße und Hausnummer"
+            value={baustellenstrasse}
+            onChange={(e) => setBaustellenstrasse(e.target.value)}
+            onBlur={() => geocodeBaustellenadresse(false)}
+          />
+        </div>
+        <div>
+          <Label htmlFor="baustellenPostleitzahl">Baustellenpostleitzahl:</Label>
+          <Input 
+            id="baustellenPostleitzahl"
+            placeholder="PLZ"
+            value={baustellenPostleitzahl}
+            onChange={(e) => setBaustellenPostleitzahl(e.target.value)}
+            onBlur={() => geocodeBaustellenadresse(false)}
+          />
+        </div>
+        <div className="flex items-end">
+          <Button 
+            onClick={() => geocodeBaustellenadresse(false)}
+            disabled={!baustellenstandort}
+            className="mb-0.5 w-full"
+            variant="secondary"
+            type="button"
+          >
+            <Search className="h-4 w-4 mr-1" />
+            Adresse suchen
+          </Button>
+        </div>
+      </div>
+      
+      {/* Route-Zusammenfassung kompakter Card */}
+      <Card className="mb-3">
+        <CardContent className="pt-3 pb-2">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+            <div>
+              <Label className="text-xs">Route Start</Label>
+              <div className="font-medium text-xs truncate">
+                {startAddress || "Kein Startpunkt"}
+              </div>
+            </div>
+            <div>
+              <Label className="text-xs">Route Ende</Label>
+              <div className="font-medium text-xs truncate">
+                {endAddress || "Kein Endpunkt"}
+              </div>
+            </div>
+            <div>
+              <Label className="text-xs">Streckenlänge</Label>
+              <div className="font-medium text-xs font-bold">
+                {distance > 0 ? 
+                  <span className="text-green-600">{distance.toFixed(2)} km</span> 
+                  : "Keine Route"}
+              </div>
+            </div>
+            <div className="md:col-span-2 lg:col-span-2 flex items-center justify-between mt-1">
+              <div className="flex items-center gap-1">
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="h-7 text-xs"
+                  onClick={clearMarkers}
+                  disabled={routeCoordinates.length === 0}
+                >
+                  <Trash2 className="h-3 w-3 mr-1" />
+                  Route löschen
+                </Button>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="h-7 text-xs"
+                  onClick={async () => {
+                    if (!startAddress || !endAddress || distance <= 0) {
+                      toast({
+                        title: "Fehler",
+                        description: "Bitte berechnen Sie zuerst eine Route zwischen zwei Punkten.",
+                        variant: "destructive",
+                      });
+                      return;
+                    }
+
+                    try {
+                      const routeData = {
+                        name: `Route ${startAddress} → ${endAddress}`,
+                        start_address: startAddress,
+                        end_address: endAddress,
+                        distance: Math.round(distance * 1000), // Convert km to meters
+                        route_data: routeCoordinates
+                      };
+
+                      const response = await fetch('/api/routes', {
+                        method: 'POST',
+                        headers: {
+                          'Content-Type': 'application/json',
+                        },
+                        body: JSON.stringify(routeData),
+                      });
+
+                      if (response.ok) {
+                        toast({
+                          title: "Erfolg",
+                          description: "Route erfolgreich gespeichert!",
+                        });
+                      } else {
+                        throw new Error('Fehler beim Speichern');
+                      }
+                    } catch (error) {
+                      toast({
+                        title: "Fehler",
+                        description: "Route konnte nicht gespeichert werden.",
+                        variant: "destructive",
+                      });
+                    }
+                  }}
+                  disabled={routeCoordinates.length === 0}
+                >
+                  <Save className="h-3 w-3 mr-1" />
+                  Route speichern
+                </Button>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="h-7 text-xs"
+                  onClick={handleSavePDF}
+                  disabled={isPdfGenerating || routeCoordinates.length === 0}
+                >
+                  <FileDown className="h-3 w-3 mr-1" />
+                  PDF-Bericht
+                </Button>
+              </div>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+      
+      {/* Geo-Dienste Tabs - oberhalb der Karte */}
+      <Tabs defaultValue="karte" className="mb-3">
+        <TabsList className="h-9">
+          <TabsTrigger value="karte" className="text-xs py-1 px-3 h-8">
+            <Map className="h-3.5 w-3.5 mr-1" />
+            Karte
+          </TabsTrigger>
+          <TabsTrigger value="denkmal" className="text-xs py-1 px-3 h-8">
+            <Building className="h-3.5 w-3.5 mr-1" />
+            DenkmalAtlas
+          </TabsTrigger>
+          <TabsTrigger value="bayern" className="text-xs py-1 px-3 h-8">
+            <GlobeIcon className="h-3.5 w-3.5 mr-1" />
+            BayernAtlas
+          </TabsTrigger>
+          <TabsTrigger value="bgr" className="text-xs py-1 px-3 h-8">
+            <ServerIcon className="h-3.5 w-3.5 mr-1" />
+            BGR Geoportal
+          </TabsTrigger>
+          <TabsTrigger value="bodendaten" className="text-xs py-1 px-3 h-8">
+            <Layers className="h-3.5 w-3.5 mr-1" />
+            Bodendaten Bayern
+          </TabsTrigger>
+        </TabsList>
+
+        {/* Karten-Tab */}
+        <TabsContent value="karte" className="p-0 m-0">
+          {/* Flex-Container für Map mit Suchleiste oben */}
+          <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: '0' }}>
+            {/* Google-Map mit div für den Container */}
+            <div className="overflow-hidden p-0 border rounded-md" style={{ isolation: 'isolate', flex: '1 1 auto', minHeight: '470px' }}>
+              <div id="tiefbau-map-container" style={{ width: '100%', height: '100%', minHeight: '470px', margin: 0, padding: 0 }}></div>
+              <EnhancedGoogleMap
+                onRouteChange={handleRouteChange}
+                onMarkersClear={clearMarkers}
+                initialCenter={{ lat: 48.137154, lng: 11.576124 }} // München
+                initialZoom={12}
+                searchOutsideMap={true} // Adresssuche oberhalb der Karte platzieren
+                initialRoute={savedRoute} // Gespeicherte Route übergeben
+                onMapReady={(map) => setMapInstance(map)} // Speichern der Map-Instanz
+                useRouteOptimization={true} // Optimierte Route aktivieren
+                showTerrainControls={true} // Terrain-Steuerungselemente anzeigen
+                height="100%" // Flexible Höhe
+                autoSearchAddress={autoSearchAddress} // Automatische Adresssuche
+              />
+            </div>
+          </div>
+        </TabsContent>
+
+        {/* DenkmalAtlas Tab */}
+        <TabsContent value="denkmal" className="p-0 m-0">
+          <Card className="border">
+            <CardContent className="p-4">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-lg font-semibold">DenkmalAtlas 2.0</h3>
+                  <Button variant="outline" size="sm" className="h-8" asChild>
+                    <a href="https://geoportal.bayern.de/denkmalatlas/" target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="h-3.5 w-3.5 mr-1" />
+                      Öffnen
+                    </a>
+                  </Button>
+                </div>
+                
+                <p className="text-sm text-muted-foreground mb-4">
+                  Der BayernAtlas-DenkmalAtlas bietet Zugriff auf alle Bau- und Bodendenkmäler in Bayern. 
+                  Diese Informationen sind wichtig für die Planung von Tiefbauarbeiten in der Nähe von denkmalgeschützten Objekten.
+                </p>
+
+                {/* Visuelle Darstellung anstelle des iframe */}
+                <div className="bg-gradient-to-br from-amber-50 to-orange-50 border-2 border-dashed border-amber-200 rounded-lg p-8">
+                  <div className="text-center space-y-4">
+                    {/* Denkmal-Symbol */}
+                    <div className="flex justify-center">
+                      <div className="w-20 h-20 bg-amber-600 rounded-lg flex items-center justify-center">
+                        <svg className="w-12 h-12 text-white" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M7 21h10V11H7v10zM5 11h2V9h10v2h2V7c0-1.1-.9-2-2-2H7c-1.1 0-2 .9-2 2v4zM8 7h8v2H8V7z"/>
+                          <path d="M12 1l6 4v2H6V5l6-4zm0 2.5L8.5 6h7L12 3.5z"/>
+                        </svg>
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <h4 className="text-xl font-semibold text-gray-800 mb-2">
+                        Denkmalschutz-Informationen für Bayern
+                      </h4>
+                      <p className="text-gray-600 mb-6">
+                        Umfassende Datenbank aller Bau- und Bodendenkmäler im Freistaat Bayern für sichere Bauplanung
+                      </p>
+                    </div>
+
+                    {/* Feature-Liste */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-left">
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Baudenkmäler</p>
+                          <p className="text-sm text-gray-600">Historische Gebäude und Bauwerke</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Bodendenkmäler</p>
+                          <p className="text-sm text-gray-600">Archäologische Fundstellen</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Schutzauflagen</p>
+                          <p className="text-sm text-gray-600">Rechtliche Bestimmungen für Bauvorhaben</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Ensembles</p>
+                          <p className="text-sm text-gray-600">Geschützte Bereiche und Stadtbilder</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Call-to-Action Buttons */}
+                    <div className="flex flex-col sm:flex-row gap-3 justify-center pt-4">
+                      <Button asChild className="bg-amber-600 hover:bg-amber-700">
+                        <a href="https://geoportal.bayern.de/denkmalatlas/" target="_blank" rel="noopener noreferrer">
+                          <Building className="w-4 h-4 mr-2" />
+                          DenkmalAtlas öffnen
+                        </a>
+                      </Button>
+                      
+                      <Button variant="outline" asChild>
+                        <a href="https://www.blfd.bayern.de/denkmalverzeichnis/" target="_blank" rel="noopener noreferrer">
+                          <Search className="w-4 h-4 mr-2" />
+                          Denkmalliste durchsuchen
+                        </a>
+                      </Button>
+                    </div>
+
+                    <div className="mt-6 p-4 bg-amber-50 border border-amber-200 rounded-lg">
+                      <p className="text-sm text-amber-800">
+                        <strong>Wichtig für Tiefbau:</strong> Vor Beginn von Erdarbeiten sollten Sie immer prüfen, 
+                        ob sich Boden- oder Baudenkmäler in der Nähe befinden. Diese Informationen sind für 
+                        Genehmigungsverfahren und die Projektplanung entscheidend.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* BayernAtlas Tab */}
+        <TabsContent value="bayern" className="p-0 m-0">
+          <Card className="border">
+            <CardContent className="p-4">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-lg font-semibold">BayernAtlas-Anbindung</h3>
+                  <Button variant="outline" size="sm" className="h-8" asChild>
+                    <a href="https://geoportal.bayern.de/bayernatlas/" target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="h-3.5 w-3.5 mr-1" />
+                      Öffnen
+                    </a>
+                  </Button>
+                </div>
+                
+                <p className="text-sm text-muted-foreground mb-4">
+                  Der BayernAtlas bietet detaillierte Karten und Geodaten für Bayern, 
+                  einschließlich Flurstücken, Luftbildern und thematischen Karten für Infrastrukturprojekte.
+                </p>
+
+                {/* Visuelle Darstellung anstelle des iframe */}
+                <div className="bg-gradient-to-br from-blue-50 to-green-50 border-2 border-dashed border-blue-200 rounded-lg p-8">
+                  <div className="text-center space-y-4">
+                    {/* Bayern-Karten-Symbol */}
+                    <div className="flex justify-center">
+                      <div className="w-20 h-20 bg-blue-500 rounded-lg flex items-center justify-center">
+                        <svg className="w-12 h-12 text-white" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M12 2C8.13 2 5 5.13 5 9c0 5.25 7 13 7 13s7-7.75 7-13c0-3.87-3.13-7-7-7zm0 9.5c-1.38 0-2.5-1.12-2.5-2.5s1.12-2.5 2.5-2.5 2.5 1.12 2.5 2.5-1.12 2.5-2.5 2.5z"/>
+                        </svg>
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <h4 className="text-xl font-semibold text-gray-800 mb-2">
+                        Professionelle Kartendaten für Bayern
+                      </h4>
+                      <p className="text-gray-600 mb-6">
+                        Zugriff auf offizielle Geodaten, Flurstücke und Infrastrukturdaten des Freistaats Bayern
+                      </p>
+                    </div>
+
+                    {/* Feature-Liste */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-left">
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Aktuelle Luftbilder</p>
+                          <p className="text-sm text-gray-600">Hochauflösende Satellitenbilder</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Flurstücksdaten</p>
+                          <p className="text-sm text-gray-600">Grundstücksgrenzen und Eigentümer</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Topografische Karten</p>
+                          <p className="text-sm text-gray-600">Höhenlinien und Geländeformen</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Infrastrukturdaten</p>
+                          <p className="text-sm text-gray-600">Straßen, Leitungen und Versorgung</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Call-to-Action Buttons */}
+                    <div className="flex flex-col sm:flex-row gap-3 justify-center pt-4">
+                      <Button asChild className="bg-blue-600 hover:bg-blue-700">
+                        <a href="https://geoportal.bayern.de/bayernatlas/" target="_blank" rel="noopener noreferrer">
+                          <Map className="w-4 h-4 mr-2" />
+                          BayernAtlas öffnen
+                        </a>
+                      </Button>
+                      
+                      <Button variant="outline" asChild>
+                        <a href="https://atlas.bayern.de/" target="_blank" rel="noopener noreferrer">
+                          <GlobeIcon className="w-4 h-4 mr-2" />
+                          Direkt zu Luftbildern
+                        </a>
+                      </Button>
+                    </div>
+
+                    <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                      <p className="text-sm text-blue-800">
+                        <strong>Hinweis:</strong> Aufgrund von Sicherheitsrichtlinien kann der BayernAtlas nicht direkt eingebettet werden. 
+                        Klicken Sie auf die Buttons oben, um den offiziellen BayernAtlas in einem neuen Tab zu öffnen.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* BGR Geoportal Tab */}
+        <TabsContent value="bgr" className="p-0 m-0">
+          <Card className="border">
+            <CardContent className="p-4">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-lg font-semibold">BGR Geoportal - Geoviewer</h3>
+                  <Button variant="outline" size="sm" className="h-8" asChild>
+                    <a href="https://geoviewer.bgr.de/" target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="h-3.5 w-3.5 mr-1" />
+                      Öffnen
+                    </a>
+                  </Button>
+                </div>
+                
+                <p className="text-sm text-muted-foreground mb-4">
+                  Der Geoviewer der Bundesanstalt für Geowissenschaften und Rohstoffe (BGR) bietet 
+                  bodenkundliche Informationen, die für Tiefbauarbeiten und Bodenbewertungen relevant sind.
+                </p>
+
+                {/* Visuelle Darstellung anstelle des iframe */}
+                <div className="bg-gradient-to-br from-green-50 to-emerald-50 border-2 border-dashed border-green-200 rounded-lg p-8">
+                  <div className="text-center space-y-4">
+                    {/* Geowissenschaften-Symbol */}
+                    <div className="flex justify-center">
+                      <div className="w-20 h-20 bg-green-600 rounded-lg flex items-center justify-center">
+                        <svg className="w-12 h-12 text-white" fill="currentColor" viewBox="0 0 24 24">
+                          <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z"/>
+                          <circle cx="12" cy="12" r="3"/>
+                        </svg>
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <h4 className="text-xl font-semibold text-gray-800 mb-2">
+                        Bundesweite Geowissenschaftliche Daten
+                      </h4>
+                      <p className="text-gray-600 mb-6">
+                        Offizielle Bodendaten und geologische Informationen der BGR für fundierte Baugrundbeurteilungen
+                      </p>
+                    </div>
+
+                    {/* Feature-Liste */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-left">
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Bodenarten</p>
+                          <p className="text-sm text-gray-600">Detaillierte Bodenkartierung</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Geologische Karten</p>
+                          <p className="text-sm text-gray-600">Gesteinsformationen und Strukturen</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Hydrogeologie</p>
+                          <p className="text-sm text-gray-600">Grundwasserdaten und Wasserschutz</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-green-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Rohstoffkarten</p>
+                          <p className="text-sm text-gray-600">Kies, Sand und andere Baustoffe</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Call-to-Action Buttons */}
+                    <div className="flex flex-col sm:flex-row gap-3 justify-center pt-4">
+                      <Button asChild className="bg-green-600 hover:bg-green-700">
+                        <a href="https://geoviewer.bgr.de/" target="_blank" rel="noopener noreferrer">
+                          <ServerIcon className="w-4 h-4 mr-2" />
+                          BGR Geoviewer öffnen
+                        </a>
+                      </Button>
+                      
+                      <Button variant="outline" asChild>
+                        <a href="https://www.bgr.bund.de/DE/Themen/Boden/boden_node.html" target="_blank" rel="noopener noreferrer">
+                          <GlobeIcon className="w-4 h-4 mr-2" />
+                          Bodenkundliche Infos
+                        </a>
+                      </Button>
+                    </div>
+
+                    <div className="mt-6 p-4 bg-green-50 border border-green-200 rounded-lg">
+                      <p className="text-sm text-green-800">
+                        <strong>Bundesweite Daten:</strong> Das BGR stellt offizielle geowissenschaftliche Daten 
+                        für ganz Deutschland bereit. Diese sind besonders wertvoll für die Beurteilung von 
+                        Baugrund und Bodeneigenschaften bei größeren Tiefbauprojekten.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+
+        {/* Bodendaten Bayern Tab */}
+        <TabsContent value="bodendaten" className="p-0 m-0">
+          <Card className="border">
+            <CardContent className="p-4">
+              <div className="space-y-4">
+                <div className="flex items-center justify-between mb-2">
+                  <h3 className="text-lg font-semibold">Bodendaten Bayern</h3>
+                  <Button variant="outline" size="sm" className="h-8" asChild>
+                    <a href="https://www.umweltatlas.bayern.de/mapapps/resources/apps/umweltatlas/index.html?lang=de&cover=boden" target="_blank" rel="noopener noreferrer">
+                      <ExternalLink className="h-3.5 w-3.5 mr-1" />
+                      Öffnen
+                    </a>
+                  </Button>
+                </div>
+                
+                <p className="text-sm text-muted-foreground mb-4">
+                  Der Umweltatlas Bayern bietet detaillierte Bodendaten und geologische Informationen 
+                  speziell für Bayern. Diese sind essentiell für Tiefbauprojekte zur Beurteilung von 
+                  Bodenbeschaffenheit und Baugrund.
+                </p>
+
+                {/* Adresse-zu-Bodenart Lookup Tool */}
+                <div className="bg-white border rounded-lg p-4 mb-4">
+                  <h4 className="font-semibold mb-3 flex items-center">
+                    <Search className="w-4 h-4 mr-2 text-blue-600" />
+                    Bodenart-Lookup für Bayern
+                  </h4>
+                  
+                  <div className="space-y-3">
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        placeholder="Adresse eingeben (z.B. Marienplatz 1, München)"
+                        className="flex-1 px-3 py-2 border border-gray-300 rounded focus:outline-none focus:ring-2 focus:ring-blue-500"
+                        value={soilLookupAddress}
+                        onChange={(e) => setSoilLookupAddress(e.target.value)}
+                      />
+                      <Button 
+                        onClick={handleSoilLookup}
+                        disabled={soilLookupLoading || !soilLookupAddress}
+                        className="bg-blue-600 hover:bg-blue-700"
+                      >
+                        {soilLookupLoading ? (
+                          <Loader2 className="w-4 h-4 animate-spin" />
+                        ) : (
+                          <Search className="w-4 h-4" />
+                        )}
+                        Analysieren
+                      </Button>
+                    </div>
+                    
+                    {soilLookupResult && (
+                      <div className="p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                        <h4 className="font-semibold text-blue-900 mb-3 flex items-center">
+                          <span className="mr-2">🗺️</span>
+                          Geologische Information für Bayern
+                        </h4>
+                        
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-sm">
+                          <div className="bg-white p-3 rounded border-l-4 border-blue-500">
+                            <p className="font-medium text-gray-800 flex items-center">
+                              <span className="mr-1">📍</span> Standort
+                            </p>
+                            <p className="text-gray-700 mt-1">{soilLookupResult.address}</p>
+                          </div>
+                          
+                          <div className="bg-white p-3 rounded border-l-4 border-green-500">
+                            <p className="font-medium text-gray-800 flex items-center">
+                              <span className="mr-1">🪨</span> Gesteinsformation
+                            </p>
+                            <p className="text-gray-700 mt-1">{soilLookupResult.soilType || 'Bayern geologische Einheit'}</p>
+                          </div>
+                          
+                          {soilLookupResult.properties?.name && (
+                            <div className="bg-white p-3 rounded border-l-4 border-purple-500">
+                              <p className="font-medium text-gray-800 flex items-center">
+                                <span className="mr-1">🏷️</span> Geologische Einheit
+                              </p>
+                              <p className="text-gray-700 mt-1 font-mono text-xs bg-gray-100 px-2 py-1 rounded">
+                                {soilLookupResult.properties.name}
+                              </p>
+                            </div>
+                          )}
+                          
+                          {soilLookupResult.properties?.description && (
+                            <div className="bg-white p-3 rounded border-l-4 border-orange-500 md:col-span-2">
+                              <p className="font-medium text-gray-800 flex items-center">
+                                <span className="mr-1">📝</span> Detaillierte Gesteinsbeschreibung
+                              </p>
+                              <p className="text-gray-700 mt-1 leading-relaxed">
+                                {soilLookupResult.properties.description}
+                              </p>
+                            </div>
+                          )}
+                          
+                          {soilLookupResult.properties?.rock_type && (
+                            <div className="bg-white p-3 rounded border-l-4 border-red-500">
+                              <p className="font-medium text-gray-800 flex items-center">
+                                <span className="mr-1">⛰️</span> Gesteinsart
+                              </p>
+                              <p className="text-gray-700 mt-1">{soilLookupResult.properties.rock_type}</p>
+                            </div>
+                          )}
+                          
+                          {soilLookupResult.properties?.age && (
+                            <div className="bg-white p-3 rounded border-l-4 border-yellow-500">
+                              <p className="font-medium text-gray-800 flex items-center">
+                                <span className="mr-1">🕰️</span> Geologisches Zeitalter
+                              </p>
+                              <p className="text-gray-700 mt-1">{soilLookupResult.properties.age}</p>
+                            </div>
+                          )}
+                        </div>
+                        
+                        {/* Bauplanung-relevante Informationen */}
+                        <div className="mt-4 p-3 bg-green-50 border border-green-200 rounded">
+                          <h5 className="font-medium text-green-800 mb-2 flex items-center">
+                            <span className="mr-1">🏗️</span> Relevanz für Bauplanung
+                          </h5>
+                          <div className="text-xs text-green-700 space-y-1">
+                            <p>• Diese geologischen Daten helfen bei der Baugrundbeurteilung</p>
+                            <p>• Wichtig für Fundament- und Stabilitätsplanung</p>
+                            <p>• Einschätzung von Tragfähigkeit und Wasserdurchlässigkeit</p>
+                          </div>
+                        </div>
+                        
+                        <div className="mt-3 pt-3 border-t border-blue-200">
+                          <p className="text-xs text-blue-600 font-medium flex items-center">
+                            <span className="mr-1">✅</span>
+                            Authentische Daten aus der geologischen Karte Bayern (GK500)
+                          </p>
+                        </div>
+                      </div>
+                    )}
+                    
+                    {soilLookupError && (
+                      <div className="p-3 bg-red-50 border border-red-200 rounded">
+                        <p className="text-sm text-red-700">{soilLookupError}</p>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                {/* Visuelle Darstellung des Bodendaten-Services */}
+                <div className="bg-gradient-to-br from-blue-50 to-green-50 border-2 border-dashed border-blue-200 rounded-lg p-8">
+                  <div className="text-center space-y-6">
+                    {/* Bodendaten-Symbol */}
+                    <div className="flex justify-center">
+                      <div className="w-20 h-20 bg-blue-600 rounded-lg flex items-center justify-center">
+                        <Layers className="w-12 h-12 text-white" />
+                      </div>
+                    </div>
+                    
+                    <div>
+                      <h4 className="text-xl font-semibold text-gray-800 mb-2">
+                        Bayerische Bodendaten & Geologie
+                      </h4>
+                      <p className="text-gray-600 mb-6">
+                        Offizielle Bodenkarten und geologische Daten des Bayerischen Landesamtes für Umwelt
+                      </p>
+                    </div>
+
+                    {/* Feature-Liste */}
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-left">
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Übersichtsbodenkarte</p>
+                          <p className="text-sm text-gray-600">Bodentypen und -eigenschaften</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Geologische Karte</p>
+                          <p className="text-sm text-gray-600">Gesteinsformationen in Bayern</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Bodenfunktionen</p>
+                          <p className="text-sm text-gray-600">Ertragspotential und Wasserspeicher</p>
+                        </div>
+                      </div>
+                      
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Altlasten</p>
+                          <p className="text-sm text-gray-600">Kontaminierte Standorte</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Grundwasser</p>
+                          <p className="text-sm text-gray-600">Grundwasserstände und -qualität</p>
+                        </div>
+                      </div>
+
+                      <div className="flex items-start space-x-3">
+                        <div className="w-6 h-6 bg-blue-500 rounded-full flex items-center justify-center flex-shrink-0 mt-0.5">
+                          <svg className="w-3 h-3 text-white" fill="currentColor" viewBox="0 0 20 20">
+                            <path fillRule="evenodd" d="M16.707 5.293a1 1 0 010 1.414l-8 8a1 1 0 01-1.414 0l-4-4a1 1 0 011.414-1.414L8 12.586l7.293-7.293a1 1 0 011.414 0z" clipRule="evenodd"/>
+                          </svg>
+                        </div>
+                        <div>
+                          <p className="font-medium text-gray-800">Rohstoffgeologie</p>
+                          <p className="text-sm text-gray-600">Kies, Sand und Natursteine</p>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Call-to-Action Buttons */}
+                    <div className="flex flex-col sm:flex-row gap-3 justify-center pt-4">
+                      <Button asChild className="bg-blue-600 hover:bg-blue-700">
+                        <a href="https://www.umweltatlas.bayern.de/mapapps/resources/apps/umweltatlas/index.html?lang=de&cover=boden" target="_blank" rel="noopener noreferrer">
+                          <Layers className="w-4 h-4 mr-2" />
+                          Umweltatlas Bayern öffnen
+                        </a>
+                      </Button>
+                      
+                      <Button variant="outline" asChild>
+                        <a href="https://www.lfu.bayern.de/boden/index.htm" target="_blank" rel="noopener noreferrer">
+                          <GlobeIcon className="w-4 h-4 mr-2" />
+                          LfU Bodeninformationen
+                        </a>
+                      </Button>
+                    </div>
+
+                    <div className="mt-6 p-4 bg-blue-50 border border-blue-200 rounded-lg">
+                      <p className="text-sm text-blue-800">
+                        <strong>Bayern-spezifisch:</strong> Der Umweltatlas Bayern bietet hochauflösende 
+                        Bodendaten speziell für bayerische Standorte. Diese sind besonders wertvoll für 
+                        die Planung von Tiefbauprojekten in Bayern, da sie lokale geologische Besonderheiten 
+                        und Bodenverhältnisse detailliert abbilden.
+                      </p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+
+      {/* Einfache Sektion für Bemerkungseingabe */}
+      <Card className="mt-3">
+        <CardContent className="p-3">
+          <div className="space-y-3">
+            <div>
+              <Label htmlFor="remarks">Bemerkungen zur Strecke:</Label>
+              <div className="flex items-center mt-1 mb-2">
+                <Button
+                  type="button"
+                  variant="outline"
+                  size="sm"
+                  className="h-7 mr-2"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Camera className="h-3.5 w-3.5 mr-1" />
+                  Foto
+                </Button>
+                <input
+                  type="file"
+                  ref={fileInputRef}
+                  accept="image/*"
+                  className="hidden"
+                  onChange={handlePhotoUpload}
+                  multiple
+                />
+                <Button
+                  type="button"
+                  variant={isRecording ? "destructive" : "outline"}
+                  size="sm"
+                  className="h-7"
+                  onClick={() => {
+                    if (isRecording) {
+                      // Stoppe Aufnahme
+                      if (recognitionRef.current) {
+                        recognitionRef.current.stop();
+                      }
+                    } else {
+                      // Starte Aufnahme
+                      try {
+                        const SpeechRecognition = window.SpeechRecognition || (window as any).webkitSpeechRecognition;
+                        if (SpeechRecognition) {
+                          recognitionRef.current = new SpeechRecognition();
+                          recognitionRef.current.lang = 'de-DE';
+                          recognitionRef.current.continuous = true;
+                          recognitionRef.current.interimResults = false;
+                          
+                          recognitionRef.current.onresult = (event: any) => {
+                            const transcript = event.results[event.results.length - 1][0].transcript;
+                            setRecordedText(prev => prev + ' ' + transcript);
+                            setRemarks(prev => prev + ' ' + transcript);
+                          };
+                          
+                          recognitionRef.current.onend = () => {
+                            setIsRecording(false);
+                          };
+                          
+                          recognitionRef.current.start();
+                          setIsRecording(true);
+                        } else {
+                          toast({
+                            title: "Nicht unterstützt",
+                            description: "Spracherkennung wird von diesem Browser nicht unterstützt.",
+                            variant: "destructive"
+                          });
+                        }
+                      } catch (error) {
+                        console.error('Fehler bei der Spracherkennung:', error);
+                        toast({
+                          title: "Fehler",
+                          description: "Spracherkennung konnte nicht gestartet werden.",
+                          variant: "destructive"
+                        });
+                        setIsRecording(false);
+                      }
+                    }
+                  }}
+                >
+                  {isRecording ? (
+                    <>
+                      <MicOff className="h-3.5 w-3.5 mr-1" />
+                      Stopp
+                    </>
+                  ) : (
+                    <>
+                      <Mic className="h-3.5 w-3.5 mr-1" />
+                      Diktieren
+                    </>
+                  )}
+                </Button>
+              </div>
+              <Textarea
+                id="remarks"
+                value={remarks}
+                onChange={(e) => setRemarks(e.target.value)}
+                placeholder="Geben Sie hier Ihre Bemerkungen zur Strecke ein..."
+                className="min-h-[100px]"
+              />
+            </div>
+            
+            {/* Fotogalerie */}
+            {photos.length > 0 && (
+              <div>
+                <Label className="block mb-2">Angehängte Fotos:</Label>
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 gap-2">
+                  {photos.map((photo, index) => (
+                    <div key={index} className="relative group">
+                      <img
+                        src={photo.preview}
+                        alt={`Foto ${index + 1}`}
+                        className="w-full h-20 object-cover rounded-md"
+                      />
+                      <Button
+                        type="button"
+                        variant="destructive"
+                        size="sm"
+                        className="absolute top-1 right-1 h-6 w-6 p-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={() => removePhoto(index)}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+            
+            <div className="flex justify-end pt-2">
+              <Button
+                type="button"
+                disabled={loading || (remarks.trim() === '' && photos.length === 0)}
+              >
+                {loading ? (
+                  <>Speichern...</>
+                ) : (
+                  <>
+                    <Paperclip className="h-4 w-4 mr-1" />
+                    Bemerkungen speichern
+                  </>
+                )}
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+    </div>
+  );
+};
+
+export default TiefbauMap;

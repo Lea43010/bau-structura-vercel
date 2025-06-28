@@ -1,0 +1,860 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Link } from 'wouter';
+import { 
+  ArrowLeft, 
+  BarChart, 
+  Save, 
+  Trash2,
+  Map,
+  Shovel,
+  FileDown,
+  ExternalLink,
+  Camera, 
+  Mic,
+  MicOff,
+  Paperclip
+} from 'lucide-react';
+import TiefbauPDFGenerator from '@/components/pdf/tiefbau-pdf-generator';
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useToast } from '@/hooks/use-toast';
+import { apiRequest } from '@/lib/queryClient';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+
+// Erweiterte Google Maps Platform mit JavaScript API
+import EnhancedGoogleMap from '@/components/maps/enhanced-google-map';
+
+interface Bodenart {
+  id: number;
+  name: string;
+  beschreibung: string;
+  dichte: number;
+  belastungsklasse: string;
+  material_kosten_pro_m2: number;
+  bearbeitungshinweise: string;
+}
+
+interface Maschine {
+  id: number;
+  name: string;
+  typ: string;
+  beschreibung: string;
+  leistung: string;
+  kosten_pro_stunde: number;
+  kosten_pro_tag: number;
+  kosten_pro_woche: number;
+  kraftstoffverbrauch: number;
+  gewicht: number;
+  bild_url?: string;
+}
+
+const TiefbauMap: React.FC = () => {
+  // Toast-Hook
+  const { toast } = useToast();
+  
+  // Funktion zum Öffnen eines externen Links in einem neuen Tab
+  const handleExternalLink = (url: string, label: string) => {
+    window.open(url, "_blank", "noopener,noreferrer");
+    console.log(`Externer Link geöffnet: ${label}`);
+  };
+
+  // State für die Route und Distanz
+  const [routeCoordinates, setRouteCoordinates] = useState<Array<{lat: number, lng: number}>>([]);
+  const [distance, setDistance] = useState(0);
+  const [startAddress, setStartAddress] = useState('');
+  const [endAddress, setEndAddress] = useState('');
+  
+  // Gemeinsamer Loading-State für alle Komponenten
+  const [loading, setLoading] = useState(false);
+  
+  // State für Bodenarten und Maschinen
+  const [bodenarten, setBodenarten] = useState<Bodenart[]>([]);
+  const [selectedBodenart, setSelectedBodenart] = useState<string>('');
+  const [maschinen, setMaschinen] = useState<Maschine[]>([]);
+  const [filteredMaschinen, setFilteredMaschinen] = useState<Maschine[]>([]);
+  
+  // Berechne die ausgewählte Bodenart als Objekt für einfachen Zugriff
+  const selectedBodenartObj = selectedBodenart 
+    ? bodenarten.find(b => b.id.toString() === selectedBodenart.toString()) 
+    : null;
+  
+  // State für Kosten
+  const [streckenkostenProM2, setStreckenkostenProM2] = useState(0);
+  const [gesamtstreckenkosten, setGesamtstreckenkosten] = useState(0);
+  
+  // State für Projekte
+  const [projects, setProjects] = useState<any[]>([]);
+  const [selectedProject, setSelectedProject] = useState<number | null>(null);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(false);
+  
+  // Google Maps Instanz für direkten Zugriff
+  const [mapInstance, setMapInstance] = useState<google.maps.Map | null>(null);
+  
+  // Neue Felder für Baustellenstandort und Baustellenstraße
+  const [baustellenstandort, setBaustellenstandort] = useState<string>('');
+  const [baustellenstrasse, setBaustellenstrasse] = useState<string>('');
+  
+  // States für Bemerkungsfeld mit Sprach- und Fotofunktion
+  const [remarks, setRemarks] = useState<string>('');
+  const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [recordedText, setRecordedText] = useState<string>('');
+  const [photos, setPhotos] = useState<{ file: File; preview: string }[]>([]);
+  const [uploading, setUploading] = useState<boolean>(false);
+  
+  // Array zum Speichern und Verwalten der aktiven Marker auf der Karte
+  const [activeMarkers, setActiveMarkers] = useState<google.maps.Marker[]>([]);
+  
+  // Referenz für Dateiauswahl
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // Referenz für die Spracherkennung
+  const recognitionRef = useRef<any>(null);
+  
+  const [isPdfGenerating, setIsPdfGenerating] = useState(false);
+  
+  // Persistenter Route-State für Tab-Wechsel
+  const [savedRoute, setSavedRoute] = useState<Array<{lat: number, lng: number}>>([]);
+  
+  // Container ID für Map
+  const mapContainerId = "tiefbau-map-container";
+  
+  // Hilfsfunktion zum Entfernen aller Marker von der Karte
+  const clearAllMarkers = () => {
+    // Entferne alle aktiven Marker von der Karte
+    activeMarkers.forEach(marker => marker.setMap(null));
+    // Leere das Array
+    setActiveMarkers([]);
+  };
+  
+  // Hilfsfunktion zum Hinzufügen eines neuen Markers
+  const addMarker = (position: google.maps.LatLngLiteral, title: string) => {
+    if (!mapInstance) return null;
+    
+    // Erstelle einen neuen Marker
+    const marker = new google.maps.Marker({
+      position,
+      map: mapInstance,
+      title,
+      animation: google.maps.Animation.DROP
+    });
+    
+    // Füge den Marker zum Array hinzu
+    setActiveMarkers(prev => [...prev, marker]);
+    
+    return marker;
+  };
+
+  // Lade Projekte beim ersten Laden
+  useEffect(() => {
+    const loadProjects = async () => {
+      setIsLoadingProjects(true);
+      try {
+        const response = await fetch('/api/projects');
+        if (!response.ok) {
+          throw new Error('Projekte konnten nicht geladen werden');
+        }
+        const data = await response.json();
+        console.log('Geladene Projekte:', data);
+        setProjects(data);
+        
+        // Standardmäßig ist "Keine Auswahl" aktiv, daher setzen wir es auf null
+        setSelectedProject(null);
+      } catch (error) {
+        console.error('Fehler beim Laden der Projekte:', error);
+        toast({
+          variant: 'destructive',
+          title: 'Fehler',
+          description: 'Projekte konnten nicht geladen werden.'
+        });
+      } finally {
+        setIsLoadingProjects(false);
+      }
+    };
+    
+    loadProjects();
+  }, [toast]);
+  
+  // Wenn ein Projekt ausgewählt wird, prüfen ob Koordinaten vorhanden sind und setzen diese
+  useEffect(() => {
+    if (selectedProject && projects.length > 0) {
+      const selectedProjectData = projects.find(project => project.id === selectedProject);
+      if (selectedProjectData) {
+        // Zunächst alle bestehenden Marker entfernen
+        clearAllMarkers();
+        
+        // Setzen der Baustelleninformationen
+        if (selectedProjectData.id === 5) {
+          // Für Projekt mit ID 5, setzen wir Zellingen und In den Riedwiesen als Standardort
+          setBaustellenstandort('Zellingen, In den Riedwiesen 1');
+          setBaustellenstrasse('');
+        } else {
+          // Adressinformationen aus dem Projekt extrahieren
+          const adressTeile = [];
+          
+          if (selectedProjectData.project_address) {
+            // Falls bereits eine Adresse gespeichert ist
+            setBaustellenstandort(selectedProjectData.project_address);
+          } else if (selectedProjectData.projectLocation) {
+            // Wenn die neuen Felder für Baustellenstandort vorhanden sind
+            setBaustellenstandort(selectedProjectData.projectLocation);
+            if (selectedProjectData.projectStreet) {
+              setBaustellenstrasse(selectedProjectData.projectStreet);
+            }
+          } else {
+            // Sonst Adresse aus dem verknüpften Kunden oder der Stadt versuchen zu extrahieren
+            if (selectedProjectData.project_name) {
+              adressTeile.push(selectedProjectData.project_name);
+            }
+            setBaustellenstandort(adressTeile.join(', ') || '');
+          }
+          setBaustellenstrasse('');
+        }
+        
+        // Spezielle Behandlung für Projekt mit ID 5
+        if (selectedProjectData.id === 5 && mapInstance) {
+          // Exakte Koordinaten vom Google Maps Link für den Schützenverein Zellingen
+          const exactLocation = {
+            lat: 49.891643,
+            lng: 9.8008527
+          };
+          
+          console.log("Verwende exakte Koordinaten für Bogenschießplatz:", exactLocation.lat, exactLocation.lng);
+          
+          // Karte zentrieren
+          mapInstance.setCenter(exactLocation);
+          mapInstance.setZoom(17); // Höchste Detailansicht
+          
+          // Marker hinzufügen mit unserer Hilfsfunktion
+          addMarker(
+            exactLocation, 
+            'Bogenschießplatz Outdoor (Schützengesellschaft 1963 e.V. Zellingen)'
+          );
+          
+          toast({
+            title: "Projekt ausgewählt",
+            description: "Bogenschießplatz Outdoor wurde ausgewählt und die Karte zentriert.",
+            duration: 3000
+          });
+        }
+        // Wenn das Projekt Koordinaten hat (Längen- und Breitengrad), zentriere die Karte
+        else if (selectedProjectData.project_latitude && selectedProjectData.project_longitude) {
+          const projectLocation = {
+            lat: parseFloat(selectedProjectData.project_latitude),
+            lng: parseFloat(selectedProjectData.project_longitude)
+          };
+          
+          // Karte auf die Projektkoordinaten zentrieren, wenn die Map-Instanz verfügbar ist
+          if (mapInstance) {
+            mapInstance.setCenter(projectLocation);
+            mapInstance.setZoom(15); // Näher zoomen für bessere Detailansicht
+            
+            // Marker hinzufügen mit unserer Hilfsfunktion
+            addMarker(
+              projectLocation, 
+              selectedProjectData.project_name || 'Projekt ' + selectedProjectData.id
+            );
+          }
+          
+          toast({
+            title: "Projekt ausgewählt",
+            description: `${selectedProjectData.project_name || 'Projekt ' + selectedProjectData.id} wurde ausgewählt und die Karte zentriert.`,
+            duration: 3000
+          });
+        } else {
+          // Wenn keine Koordinaten vorhanden sind, versuchen wir, die Adresse zu geocodieren
+          if (baustellenstandort && mapInstance) {
+            // Geocodierung durchführen, wenn wir eine Adresse haben
+            const geocoder = new google.maps.Geocoder();
+            geocoder.geocode({ address: baustellenstandort + (baustellenstrasse ? ', ' + baustellenstrasse : '') }, (results, status) => {
+              if (status === google.maps.GeocoderStatus.OK && results && results.length > 0) {
+                const location = results[0].geometry.location;
+                
+                // Karte zentrieren
+                mapInstance.setCenter(location);
+                mapInstance.setZoom(15);
+                
+                // Marker hinzufügen mit unserer Hilfsfunktion
+                addMarker(
+                  { lat: location.lat(), lng: location.lng() },
+                  selectedProjectData.project_name || 'Projekt ' + selectedProjectData.id
+                );
+                
+                toast({
+                  title: "Standort gefunden",
+                  description: `Der Baustellenstandort wurde auf der Karte angezeigt.`,
+                  duration: 3000
+                });
+              } else {
+                toast({
+                  title: "Standort nicht gefunden",
+                  description: `Die Adresse "${baustellenstandort}" konnte nicht auf der Karte lokalisiert werden.`,
+                  variant: "destructive",
+                  duration: 5000
+                });
+              }
+            });
+          } else {
+            toast({
+              title: "Projekt ausgewählt",
+              description: `${selectedProjectData.project_name || 'Projekt ' + selectedProjectData.id} wurde ausgewählt.`,
+              duration: 3000
+            });
+          }
+        }
+      }
+    }
+  }, [selectedProject, projects, toast, mapInstance, baustellenstandort, baustellenstrasse]);
+  
+  // Initialisierung der Spracherkennung
+  useEffect(() => {
+    // Überprüfen, ob die Web Speech API verfügbar ist
+    if ('webkitSpeechRecognition' in window || 'SpeechRecognition' in window) {
+      const SpeechRecognition = window.webkitSpeechRecognition || window.SpeechRecognition;
+      recognitionRef.current = new SpeechRecognition();
+      
+      // Konfiguration
+      recognitionRef.current.continuous = true;
+      recognitionRef.current.interimResults = true;
+      recognitionRef.current.lang = 'de-DE';
+      
+      // Event-Handler
+      recognitionRef.current.onresult = (event: any) => {
+        let interimTranscript = '';
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          const transcript = event.results[i][0].transcript;
+          if (event.results[i].isFinal) {
+            setRecordedText(prev => prev + transcript + ' ');
+            setRemarks(prev => prev + transcript + ' ');
+          } else {
+            interimTranscript += transcript;
+          }
+        }
+      };
+      
+      recognitionRef.current.onerror = (event: any) => {
+        console.error("Spracherkennungsfehler:", event.error);
+        setIsRecording(false);
+        toast({
+          title: "Spracherkennungsfehler",
+          description: `Fehler bei der Spracherkennung: ${event.error}`,
+          variant: "destructive"
+        });
+      };
+      
+      recognitionRef.current.onend = () => {
+        setIsRecording(false);
+      };
+    }
+    
+    return () => {
+      // Aufräumen
+      if (recognitionRef.current) {
+        if (isRecording) {
+          try {
+            recognitionRef.current.stop();
+          } catch (error) {
+            console.error('Fehler beim Stoppen der Spracherkennung:', error);
+          }
+        }
+      }
+    };
+  }, [isRecording, toast]);
+  
+  // Funktion zum Starten der Spracherkennung
+  const startSpeechRecognition = () => {
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.start();
+        setIsRecording(true);
+        toast({
+          title: "Spracherkennung aktiv",
+          description: "Bitte sprechen Sie jetzt...",
+        });
+      } catch (error) {
+        console.error('Fehler beim Starten der Spracherkennung:', error);
+        toast({
+          title: "Fehler",
+          description: "Die Spracherkennung konnte nicht gestartet werden",
+          variant: "destructive"
+        });
+      }
+    } else {
+      toast({
+        title: "Nicht unterstützt",
+        description: "Spracherkennung wird in diesem Browser nicht unterstützt",
+        variant: "destructive"
+      });
+    }
+  };
+  
+  // Funktion zum Stoppen der Spracherkennung
+  const stopSpeechRecognition = () => {
+    if (recognitionRef.current && isRecording) {
+      try {
+        recognitionRef.current.stop();
+        setIsRecording(false);
+        toast({
+          title: "Spracherkennung beendet",
+          description: "Der Text wurde in das Bemerkungsfeld übernommen",
+        });
+      } catch (error) {
+        console.error('Fehler beim Stoppen der Spracherkennung:', error);
+      }
+    }
+  };
+  
+  // Funktion zum Hochladen eines Fotos
+  const handlePhotoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files && event.target.files.length > 0) {
+      Array.from(event.target.files).forEach(file => {
+        if (file.type.startsWith('image/')) {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const preview = e.target?.result as string;
+            setPhotos(prev => [...prev, { file, preview }]);
+          };
+          reader.readAsDataURL(file);
+        }
+      });
+    }
+  };
+  
+  // Funktion zum Entfernen eines Fotos
+  const removePhoto = (index: number) => {
+    setPhotos(photos.filter((_, i) => i !== index));
+  };
+  
+  // Callback für Routenänderungen von der Karte
+  const handleRouteChange = (
+    newRoute: Array<{lat: number, lng: number}>,
+    start?: string,
+    end?: string,
+    routeDistance?: number
+  ) => {
+    setRouteCoordinates(newRoute);
+    if (start) setStartAddress(start);
+    if (end) setEndAddress(end);
+    if (routeDistance) setDistance(routeDistance);
+    setSavedRoute(newRoute); // Speichere die Route für den Tab-Wechsel
+  };
+  
+  // Route aus der Karte entfernen
+  const clearMarkers = () => {
+    setRouteCoordinates([]);
+    setDistance(0);
+    setStartAddress('');
+    setEndAddress('');
+    setSavedRoute([]);
+    // Rufe die Funktion auf der EnhancedGoogleMap-Komponente über die Referenz auf
+    if (mapInstance) {
+      clearAllMarkers();
+    }
+  };
+  
+  // Funktion zum Speichern der Route
+  const saveRoute = async () => {
+    if (routeCoordinates.length === 0) {
+      toast({
+        title: "Keine Route vorhanden",
+        description: "Bitte erstellen Sie zuerst eine Route auf der Karte.",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    if (!selectedProject) {
+      toast({
+        title: "Kein Projekt ausgewählt",
+        description: "Bitte wählen Sie ein Projekt aus, um die Route zu speichern.",
+        variant: "destructive"
+      });
+      return;
+    }
+    
+    setLoading(true);
+    
+    try {
+      // Format the route data for the API
+      const routeData = {
+        projectId: selectedProject,
+        route: routeCoordinates,
+        startAddress,
+        endAddress,
+        distance,
+        remarks,
+        baustellenstandort,
+        baustellenstrasse
+      };
+      
+      // Make the API request
+      const response = await apiRequest('POST', '/api/routes', routeData);
+      
+      if (!response.ok) {
+        throw new Error('Route konnte nicht gespeichert werden');
+      }
+      
+      const data = await response.json();
+      
+      toast({
+        title: "Route gespeichert",
+        description: `Die Route wurde erfolgreich für ${projects.find(p => p.id === selectedProject)?.project_name || 'das Projekt'} gespeichert.`,
+      });
+      
+    } catch (error) {
+      console.error('Fehler beim Speichern der Route:', error);
+      toast({
+        title: "Fehler",
+        description: "Die Route konnte nicht gespeichert werden.",
+        variant: "destructive"
+      });
+    } finally {
+      setLoading(false);
+    }
+  };
+  
+  // Funktion zum Generieren eines PDF-Berichts
+  const generatePDF = () => {
+    setIsPdfGenerating(true);
+    setTimeout(() => {
+      setIsPdfGenerating(false);
+      
+      toast({
+        title: "PDF erstellt",
+        description: "Der PDF-Bericht wurde erstellt und zum Download angeboten.",
+      });
+    }, 1000);
+  };
+
+  return (
+    <div className="container mx-auto py-3" style={{ display: 'flex', flexDirection: 'column', minHeight: 'calc(100vh - 2rem)' }}>
+      <div className="mb-3 flex justify-between items-center">
+        <div className="flex items-center">
+          <Link href="/projects">
+            <Button variant="outline" size="sm" className="mr-2">
+              <ArrowLeft className="h-4 w-4 mr-1" />
+              Zurück
+            </Button>
+          </Link>
+          <h1 className="text-2xl font-bold">Tiefbau Map</h1>
+        </div>
+        
+        {/* Projektauswahl kompakt in der Kopfzeile */}
+        <div>
+          <Select 
+            value={selectedProject?.toString() || ""}
+            onValueChange={(value) => setSelectedProject(value ? parseInt(value) : null)}
+            disabled={isLoadingProjects}
+          >
+            <SelectTrigger className="w-[200px]">
+              <SelectValue placeholder="Projekt auswählen" />
+            </SelectTrigger>
+            <SelectContent>
+              {projects.map((project) => (
+                <SelectItem 
+                  key={project.id} 
+                  value={project.id.toString()}
+                >
+                  {project.project_name || `Projekt ${project.id}`}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      
+      {/* Standortdaten in einer Zeile */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+        <div>
+          <Label htmlFor="baustellenstandort">Baustellenstandort</Label>
+          <Input 
+            id="baustellenstandort"
+            value={baustellenstandort} 
+            onChange={(e) => setBaustellenstandort(e.target.value)} 
+            placeholder="z.B. Berlin, München"
+          />
+        </div>
+        <div>
+          <Label htmlFor="baustellenstrasse">Baustellenstraße</Label>
+          <Input 
+            id="baustellenstrasse"
+            value={baustellenstrasse} 
+            onChange={(e) => setBaustellenstrasse(e.target.value)} 
+            placeholder="z.B. Hauptstraße 123"
+          />
+        </div>
+      </div>
+      
+      {/* Streckeninfo-Kachel direkt über der Karte */}
+      <Card className="mb-2">
+        <CardContent className="p-2">
+          <div className="flex flex-wrap justify-between items-center gap-2">
+            {/* Streckenlänge und Adressen */}
+            <div className="flex flex-wrap items-center gap-3">
+              <div>
+                <p className="text-lg font-medium">Streckenlänge: <span className="text-primary font-semibold">{distance} km</span></p>
+              </div>
+              
+              {startAddress && endAddress && (
+                <>
+                  <div className="flex items-center gap-1">
+                    <div className="bg-primary/10 p-1 rounded-full">
+                      <div className="w-3 h-3 rounded-full bg-green-500"></div>
+                    </div>
+                    <div>
+                      <span className="block text-muted-foreground text-xs">Start</span>
+                      <span className="font-medium text-sm">{startAddress}</span>
+                    </div>
+                  </div>
+                  
+                  <div className="flex items-center gap-1">
+                    <div className="bg-primary/10 p-1 rounded-full">
+                      <div className="w-3 h-3 rounded-full bg-red-500"></div>
+                    </div>
+                    <div>
+                      <span className="block text-muted-foreground text-xs">Ziel</span>
+                      <span className="font-medium text-sm">{endAddress}</span>
+                    </div>
+                  </div>
+                </>
+              )}
+            </div>
+            
+            {/* Aktions-Buttons */}
+            <div className="flex gap-1">
+              <Button 
+                variant="outline" 
+                onClick={clearMarkers} 
+                disabled={loading || routeCoordinates.length === 0}
+                size="sm"
+              >
+                <Trash2 className="h-4 w-4 mr-1" />
+                Strecke zurücksetzen
+              </Button>
+              
+              <Button 
+                onClick={saveRoute} 
+                disabled={loading || routeCoordinates.length === 0 || !selectedProject}
+                size="sm"
+              >
+                <Save className="h-4 w-4 mr-1" />
+                Route speichern
+              </Button>
+              
+              <Button 
+                variant="outline" 
+                onClick={generatePDF} 
+                disabled={isPdfGenerating || routeCoordinates.length === 0}
+                size="sm"
+              >
+                <FileDown className="h-4 w-4 mr-1" />
+                PDF-Bericht
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+      
+      {/* Flex-Container für Map und Tabs */}
+      <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: '0' }}>
+        {/* Google-Map mit div für den Container - optimierte Höhe und verbesserte Einbettung */}
+        <div className="overflow-hidden p-0 border mb-2" style={{ isolation: 'isolate', flex: '1 1 auto', minHeight: '470px' }}>
+          {/* Enthaltender Container mit flexibler Höhe für korrektes Rendering */}
+          <div id="tiefbau-map-container" style={{ width: '100%', height: '100%', minHeight: '470px', margin: 0, padding: 0 }}></div>
+          <EnhancedGoogleMap
+            onRouteChange={handleRouteChange}
+            onMarkersClear={clearMarkers}
+            initialCenter={{ lat: 48.137154, lng: 11.576124 }} // München
+            initialZoom={12}
+            searchOutsideMap={true} // Adresssuche außerhalb der Karte platzieren
+          initialRoute={savedRoute} // Gespeicherte Route übergeben
+          onMapReady={(map) => setMapInstance(map)} // Speichern der Map-Instanz
+          useRouteOptimization={true} // Optimierte Route aktivieren
+          showTerrainControls={true} // Terrain-Steuerungselemente anzeigen
+          height="470px"
+          className="m-0 p-0"
+        />
+      </div>
+      
+      {/* Tabs für zusätzliche Funktionen - verbundenes Design zur Karte */}
+      <Tabs defaultValue="karte" className="space-y-0 mt-0 border-x border-b rounded-b-md">
+        <TabsList className="h-8 p-0">
+          <TabsTrigger value="karte" className="text-xs py-1 px-2 h-7">
+            <Map className="h-3 w-3 mr-1" />
+            Bemerkungen
+          </TabsTrigger>
+          <TabsTrigger value="boden" className="text-xs py-1 px-2 h-7">
+            <Shovel className="h-3 w-3 mr-1" />
+            Bodenanalyse
+          </TabsTrigger>
+          <TabsTrigger value="bund" className="text-xs py-1 px-2 h-7">
+            <Map className="h-3 w-3 mr-1" />
+            Denkmal-Dienste
+          </TabsTrigger>
+        </TabsList>
+        
+        {/* Kartenansicht Tab - nur noch Bemerkungen */}
+        <TabsContent value="karte" className="pt-0 mt-1">
+          <details className="border rounded-md">
+            <summary className="flex justify-between items-center p-2 cursor-pointer font-medium bg-secondary/10 hover:bg-secondary/20 text-sm">
+              <span className="flex items-center">
+                <Paperclip className="h-3.5 w-3.5 mr-1" />
+                Bemerkungen und Fotos
+              </span>
+              <div className="flex gap-1">
+                <Button
+                  variant="outline"
+                  size="sm"
+                  onClick={(e) => {
+                    e.preventDefault();
+                    fileInputRef.current?.click();
+                  }}
+                  disabled={uploading}
+                  className="flex items-center h-6 px-2 py-0 text-xs"
+                >
+                  <Camera className="h-3 w-3 mr-1" />
+                  Foto
+                </Button>
+                <input
+                  type="file"
+                  accept="image/*"
+                  multiple
+                  onChange={handlePhotoUpload}
+                  ref={fileInputRef}
+                  className="hidden"
+                />
+                
+                {isRecording ? (
+                  <Button
+                    variant="destructive"
+                    size="sm"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      stopSpeechRecognition();
+                    }}
+                    className="flex items-center h-7 px-2 py-0 text-xs"
+                  >
+                    <MicOff className="h-3 w-3 mr-1" />
+                    Stopp
+                  </Button>
+                ) : (
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={(e) => {
+                      e.preventDefault();
+                      startSpeechRecognition();
+                    }}
+                    className="flex items-center h-7 px-2 py-0 text-xs"
+                  >
+                    <Mic className="h-3 w-3 mr-1" />
+                    Diktieren
+                  </Button>
+                )}
+              </div>
+            </summary>
+            <div className="p-2">
+              <Textarea
+                placeholder="Notizen zur Strecke eingeben..."
+                className="min-h-[80px] text-sm"
+                value={remarks}
+                onChange={(e) => setRemarks(e.target.value)}
+              />
+              
+              {/* Fotos-Bereich - kompakter */}
+              {photos.length > 0 && (
+                <div className="mt-2">
+                  <h4 className="text-xs font-medium mb-1">Angehängte Fotos ({photos.length})</h4>
+                  <div className="grid grid-cols-3 sm:grid-cols-4 md:grid-cols-6 gap-1">
+                    {photos.map((photo, index) => (
+                      <div key={index} className="relative group">
+                        <img
+                          src={photo.preview}
+                          alt={`Foto ${index + 1}`}
+                          className="w-full h-16 object-cover rounded-md border border-border"
+                        />
+                        <Button
+                          variant="destructive"
+                          size="sm"
+                          className="absolute top-1 right-1 h-5 w-5 p-0 opacity-0 group-hover:opacity-100 transition-opacity"
+                          onClick={() => removePhoto(index)}
+                        >
+                          ×
+                        </Button>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </details>
+          
+          {/* PDF-Generator (versteckt) */}
+          <div className="hidden">
+            {isPdfGenerating && (
+              <TiefbauPDFGenerator
+                projectName={selectedProject ? (projects.find(p => p.id === selectedProject)?.project_name || `Projekt ${selectedProject}`) : "Keine Projektzuordnung"}
+                routeData={{
+                  start: startAddress,
+                  end: endAddress,
+                  distance: distance
+                }}
+                bodenartData={selectedBodenartObj ? {
+                  name: selectedBodenartObj.name,
+                  beschreibung: selectedBodenartObj.beschreibung,
+                  kostenProM2: selectedBodenartObj.material_kosten_pro_m2,
+                  gesamtkosten: gesamtstreckenkosten
+                } : null}
+                maschinenData={filteredMaschinen ? filteredMaschinen.map((m, index) => ({
+                  id: index,
+                  name: m.name,
+                  typ: m.typ,
+                  leistung: m.leistung,
+                  kostenProStunde: m.kosten_pro_stunde
+                })) : null}
+                mapContainerId={mapContainerId}
+                remarks={remarks}
+                remarksPhotos={photos}
+              />
+            )}
+          </div>
+        </TabsContent>
+        
+        {/* Bodenanalyse Tab - kompakter */}
+        <TabsContent value="boden" className="pt-1">
+          <Card className="border">
+            <CardHeader className="py-3 px-4">
+              <CardTitle className="text-base">Bodenanalyse</CardTitle>
+              <CardDescription className="text-xs">
+                Analysieren Sie die Bodenbeschaffenheit entlang der Route
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="py-2 px-4">
+              <p className="text-sm">Die Bodenanalyse wird in diesem Demo-Tab angezeigt.</p>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        
+        {/* Denkmal-Dienste Tab - kompakter */}
+        <TabsContent value="bund" className="pt-1">
+          <Card className="border">
+            <CardHeader className="py-3 px-4">
+              <CardTitle className="text-base">Denkmal-Dienste</CardTitle>
+              <CardDescription className="text-xs">
+                Informationen zu Denkmälern und geschützten Bereichen
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="py-2 px-4">
+              <p className="text-sm">Denkmal-Informationen werden in diesem Demo-Tab angezeigt.</p>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+    </div>
+  );
+};
+
+export default TiefbauMap;

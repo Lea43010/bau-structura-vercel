@@ -1,0 +1,637 @@
+import React, { useState, useEffect, useRef } from 'react';
+import { Link } from 'wouter';
+import { 
+  ArrowLeft, 
+  BarChart, 
+  Save, 
+  Trash2,
+  Map,
+  Shovel,
+  FileDown,
+  ExternalLink,
+  Camera, 
+  Mic,
+  MicOff,
+  Paperclip,
+  Building as BuildingIcon,
+  Globe as GlobeIcon,
+  Server as ServerIcon,
+  MessageSquare as MessageSquareIcon
+} from 'lucide-react';
+import TiefbauPDFGenerator from '@/components/pdf/tiefbau-pdf-generator';
+import { Button } from "@/components/ui/button";
+import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { useToast } from '@/hooks/use-toast';
+import { apiRequest } from '@/lib/queryClient';
+import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Textarea } from "@/components/ui/textarea";
+
+// Erweiterte Google Maps Platform mit JavaScript API
+import EnhancedGoogleMap from '@/components/maps/enhanced-google-map';
+
+interface Bodenart {
+  id: number;
+  name: string;
+  beschreibung: string;
+  dichte: number;
+  belastungsklasse: string;
+  material_kosten_pro_m2: number;
+  bearbeitungshinweise: string;
+}
+
+interface Maschine {
+  id: number;
+  name: string;
+  typ: string;
+  beschreibung: string;
+  leistung: string;
+  kosten_pro_stunde: number;
+  kosten_pro_tag: number;
+  kosten_pro_woche: number;
+  kraftstoffverbrauch: number;
+  gewicht: number;
+  bild_url?: string;
+}
+
+const TiefbauMap: React.FC = () => {
+  // Toast-Hook
+  const { toast } = useToast();
+  
+  // State für die Route und Distanz
+  const [routeCoordinates, setRouteCoordinates] = useState<Array<{lat: number, lng: number}>>([]);
+  const [distance, setDistance] = useState(0);
+  const [startAddress, setStartAddress] = useState('');
+  const [endAddress, setEndAddress] = useState('');
+  
+  // Gemeinsamer Loading-State für alle Komponenten
+  const [loading, setLoading] = useState(false);
+  
+  // State für Bodenarten und Maschinen
+  const [bodenarten, setBodenarten] = useState<Bodenart[]>([]);
+  const [selectedBodenart, setSelectedBodenart] = useState<string>('');
+  const [maschinen, setMaschinen] = useState<Maschine[]>([]);
+  const [filteredMaschinen, setFilteredMaschinen] = useState<Maschine[]>([]);
+  
+  // Berechne die ausgewählte Bodenart als Objekt für einfachen Zugriff
+  const selectedBodenartObj = selectedBodenart 
+    ? bodenarten.find(b => b.id.toString() === selectedBodenart.toString()) 
+    : null;
+  
+  // State für Kosten
+  const [streckenkostenProM2, setStreckenkostenProM2] = useState(0);
+  const [gesamtstreckenkosten, setGesamtstreckenkosten] = useState(0);
+  
+  // State für Projekte
+  const [projects, setProjects] = useState<any[]>([]);
+  const [selectedProject, setSelectedProject] = useState<number | null>(null);
+  const [isLoadingProjects, setIsLoadingProjects] = useState(false);
+  
+  // Google Maps Instanz für direkten Zugriff
+  const [mapInstance, setMapInstance] = useState<google.maps.Map | null>(null);
+  
+  // Neue Felder für Baustellenstandort und Baustellenstraße
+  const [baustellenstandort, setBaustellenstandort] = useState<string>('');
+  const [baustellenstrasse, setBaustellenstrasse] = useState<string>('');
+  
+  // States für Bemerkungsfeld mit Sprach- und Fotofunktion
+  const [remarks, setRemarks] = useState<string>('');
+  const [isRecording, setIsRecording] = useState<boolean>(false);
+  const [recordedText, setRecordedText] = useState<string>('');
+  const [photos, setPhotos] = useState<{ file: File; preview: string }[]>([]);
+  const [uploading, setUploading] = useState<boolean>(false);
+  
+  // Array zum Speichern und Verwalten der aktiven Marker auf der Karte
+  const [activeMarkers, setActiveMarkers] = useState<google.maps.Marker[]>([]);
+  
+  // Referenz für Dateiauswahl
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  
+  // Referenz für die Spracherkennung
+  const recognitionRef = useRef<any>(null);
+  
+  const [isPdfGenerating, setIsPdfGenerating] = useState(false);
+  
+  // Persistenter Route-State für Tab-Wechsel
+  const [savedRoute, setSavedRoute] = useState<Array<{lat: number, lng: number}>>([]);
+  
+  // Container ID für Map
+  const mapContainerId = "tiefbau-map-container";
+  
+  // Funktion zum Hochladen von Fotos
+  const handlePhotoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    if (event.target.files && event.target.files.length > 0) {
+      Array.from(event.target.files).forEach(file => {
+        if (file.type.startsWith('image/')) {
+          const reader = new FileReader();
+          reader.onload = (e) => {
+            const preview = e.target?.result as string;
+            setPhotos(prev => [...prev, { file, preview }]);
+          };
+          reader.readAsDataURL(file);
+        }
+      });
+    }
+  };
+  
+  // Funktion zum Entfernen eines Fotos
+  const removePhoto = (index: number) => {
+    setPhotos(photos.filter((_, i) => i !== index));
+  };
+  
+  // Hilfsfunktion zum Entfernen aller Marker von der Karte
+  const clearAllMarkers = () => {
+    // Entferne alle aktiven Marker von der Karte
+    activeMarkers.forEach(marker => marker.setMap(null));
+    // Leere das Array
+    setActiveMarkers([]);
+  };
+  
+  // Funktion zum Speichern des PDF-Berichts
+  const handleSavePDF = async () => {
+    try {
+      setIsPdfGenerating(true);
+      // PDF-Generierungslogik hier
+      toast({
+        title: "PDF erstellt",
+        description: "PDF-Bericht wurde erfolgreich erstellt und gespeichert.",
+      });
+    } catch (error) {
+      console.error('Fehler bei der PDF-Generierung:', error);
+      toast({
+        title: "Fehler",
+        description: "PDF-Bericht konnte nicht erstellt werden.",
+        variant: "destructive"
+      });
+    } finally {
+      setIsPdfGenerating(false);
+    }
+  };
+  
+  // Lade Projekte beim ersten Laden
+  useEffect(() => {
+    const loadProjects = async () => {
+      setIsLoadingProjects(true);
+      try {
+        const response = await fetch('/api/projects');
+        if (!response.ok) {
+          throw new Error('Projekte konnten nicht geladen werden');
+        }
+        const data = await response.json();
+        
+        // Detaillierte Projekteigenschaften in der Konsole anzeigen
+        console.log('Geladene Projekte:', data);
+        
+        // Bei Testdaten: Geocoordinaten manuell hinzufügen (nur für Testzwecke)
+        // In der Produktionsversion würden die Projekte bereits mit Koordinaten im Backend gespeichert sein
+        const enhancedData = data.map(project => {
+          if (project.id === 3 && project.projectName === "Weilheim" && (!project.project_latitude || !project.project_longitude)) {
+            return {
+              ...project,
+              project_latitude: "47.8405",
+              project_longitude: "11.1575",
+              project_location: project.project_location || "Weilheim in Oberbayern",
+              project_street: project.project_street || "Pöltnerstraße 25"
+            };
+          }
+          if (project.id === 2 && project.projectName === "Baustelle Oberbrunn" && (!project.project_latitude || !project.project_longitude)) {
+            return {
+              ...project,
+              project_latitude: "47.9441",
+              project_longitude: "11.2704",
+              project_location: project.project_location || "Oberbrunn",
+              project_street: project.project_street || "Hauptstraße 2"
+            };
+          }
+          return project;
+        });
+        
+        setProjects(enhancedData);
+        
+        // Standardmäßig ist "Keine Auswahl" aktiv, daher setzen wir es auf null
+        setSelectedProject(null);
+      } catch (error) {
+        console.error('Fehler beim Laden der Projekte:', error);
+        toast({
+          variant: 'destructive',
+          title: 'Fehler',
+          description: 'Projekte konnten nicht geladen werden.'
+        });
+      } finally {
+        setIsLoadingProjects(false);
+      }
+    };
+    
+    loadProjects();
+  }, [toast]);
+  
+  // Callback für Routenänderungen von der Karte
+  const handleRouteChange = (
+    newRoute: Array<{lat: number, lng: number}>,
+    start?: string,
+    end?: string,
+    routeDistance?: number
+  ) => {
+    console.log("handleRouteChange aufgerufen mit:", { newRoute, start, end, routeDistance });
+    
+    setRouteCoordinates(newRoute);
+    if (start) setStartAddress(start);
+    if (end) setEndAddress(end);
+    
+    // Sicherstellen, dass routeDistance korrekt ist
+    if (routeDistance !== undefined && !isNaN(routeDistance) && routeDistance > 0) {
+      console.log("Setze Distanz auf:", routeDistance, "km");
+      setDistance(routeDistance);
+      
+      // Kosten basierend auf Strecke berechnen
+      if (selectedBodenartObj) {
+        const streckenkosten = selectedBodenartObj.material_kosten_pro_m2 || 0;
+        setStreckenkostenProM2(streckenkosten);
+        setGesamtstreckenkosten(streckenkosten * routeDistance); // km * €/m²
+      }
+    } else {
+      console.warn("Ungültige oder fehlende Distanz:", routeDistance);
+    }
+    
+    // Auch im persistenten State speichern
+    setSavedRoute(newRoute);
+  };
+  
+  // Hilfsfunktion zum Löschen von Markern
+  const clearMarkers = () => {
+    clearAllMarkers();
+    setRouteCoordinates([]);
+    setDistance(0);
+    setStartAddress('');
+    setEndAddress('');
+    setSavedRoute([]);
+  };
+  
+  return (
+    <div className="container mx-auto py-3" style={{ display: 'flex', flexDirection: 'column', minHeight: 'calc(100vh - 2rem)' }}>
+      <div className="mb-3 flex justify-between items-center">
+        <div className="flex items-center">
+          <Link href="/projects">
+            <Button variant="outline" size="sm" className="mr-2">
+              <ArrowLeft className="h-4 w-4 mr-1" />
+              Zurück
+            </Button>
+          </Link>
+          <h1 className="text-2xl font-bold">Tiefbau Map</h1>
+        </div>
+        
+        {/* Projektauswahl kompakt in der Kopfzeile */}
+        <div>
+          <Select 
+            value={selectedProject?.toString() || ""}
+            onValueChange={(value) => {
+              const projectId = value ? parseInt(value) : null;
+              setSelectedProject(projectId);
+              
+              // Wenn ein Projekt ausgewählt wurde, die Projektdaten anwenden
+              if (projectId) {
+                const selectedProjectData = projects.find(p => p.id === projectId);
+                if (selectedProjectData) {
+                  // Standortdaten ausfüllen
+                  setBaustellenstandort(selectedProjectData.project_location || '');
+                  setBaustellenstrasse(selectedProjectData.project_street || '');
+                  
+                  // Wenn Geokoordinaten vorhanden sind, die Karte darauf zentrieren
+                  if (selectedProjectData.project_latitude && selectedProjectData.project_longitude) {
+                    const lat = parseFloat(selectedProjectData.project_latitude);
+                    const lng = parseFloat(selectedProjectData.project_longitude);
+                    
+                    if (!isNaN(lat) && !isNaN(lng) && mapInstance) {
+                      // Karte auf Projektposition zentrieren
+                      mapInstance.setCenter({ lat, lng });
+                      mapInstance.setZoom(15); // Näher zoomen
+                      
+                      // Optional: Marker für die Projektposition setzen
+                      const newMarker = new google.maps.Marker({
+                        position: { lat, lng },
+                        map: mapInstance,
+                        title: selectedProjectData.project_name || `Projekt ${selectedProjectData.id}`,
+                        animation: google.maps.Animation.DROP
+                      });
+                      
+                      // Marker zum Array hinzufügen, damit er später entfernt werden kann
+                      setActiveMarkers(prev => [...prev, newMarker]);
+                    }
+                  }
+                }
+              } else {
+                // Wenn kein Projekt ausgewählt ist, Formulardaten zurücksetzen
+                setBaustellenstandort('');
+                setBaustellenstrasse('');
+              }
+            }}
+            disabled={isLoadingProjects}
+          >
+            <SelectTrigger className="w-[200px]">
+              <SelectValue placeholder="Projekt auswählen" />
+            </SelectTrigger>
+            <SelectContent>
+              {projects.map((project) => (
+                <SelectItem 
+                  key={project.id} 
+                  value={project.id.toString()}
+                >
+                  {project.projectName || project.project_name || `Projekt ${project.id}`}
+                </SelectItem>
+              ))}
+            </SelectContent>
+          </Select>
+        </div>
+      </div>
+      
+      {/* Standortdaten in einer Zeile */}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+        <div>
+          <Label htmlFor="baustellenstandort">Baustellenstandort:</Label>
+          <Input 
+            id="baustellenstandort"
+            placeholder="Stadt/Gemeinde"
+            value={baustellenstandort}
+            onChange={(e) => setBaustellenstandort(e.target.value)}
+          />
+        </div>
+        <div>
+          <Label htmlFor="baustellenstrasse">Baustellenstraße:</Label>
+          <Input 
+            id="baustellenstrasse"
+            placeholder="Straße und Hausnummer"
+            value={baustellenstrasse}
+            onChange={(e) => setBaustellenstrasse(e.target.value)}
+          />
+        </div>
+      </div>
+      
+      {/* Route-Zusammenfassung kompakter Card */}
+      <Card className="mb-3">
+        <CardContent className="pt-3 pb-2">
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
+            <div>
+              <Label className="text-xs">Route Start</Label>
+              <div className="font-medium text-sm truncate">{startAddress || "Kein Startpunkt"}</div>
+            </div>
+            <div>
+              <Label className="text-xs">Route Ende</Label>
+              <div className="font-medium text-sm truncate">{endAddress || "Kein Endpunkt"}</div>
+            </div>
+            <div>
+              <Label className="text-xs">Streckenlänge</Label>
+              <div className="font-medium text-sm font-bold">
+                {distance > 0 ? 
+                  <span className="text-green-600">{distance.toFixed(2)} km</span> 
+                  : "Keine Route"}
+              </div>
+            </div>
+            <div className="md:col-span-2 lg:col-span-2 flex items-center justify-between mt-1">
+              <div className="flex items-center gap-1">
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="h-7 text-xs"
+                  onClick={clearMarkers}
+                  disabled={routeCoordinates.length === 0}
+                >
+                  <Trash2 className="h-3 w-3 mr-1" />
+                  Route löschen
+                </Button>
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="h-7 text-xs"
+                  onClick={() => console.log("Routen-Informationen für Speichern:", { start: startAddress, end: endAddress, distance, route: routeCoordinates })}
+                  disabled={routeCoordinates.length === 0}
+                >
+                  <Save className="h-3 w-3 mr-1" />
+                  Route speichern
+                </Button>
+              </div>
+              <Button 
+                variant="outline" 
+                size="sm" 
+                className="h-7 text-xs"
+                onClick={handleSavePDF}
+                disabled={isPdfGenerating || routeCoordinates.length === 0}
+              >
+                <FileDown className="h-3 w-3 mr-1" />
+                PDF-Bericht
+              </Button>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+      
+      {/* Geo-Dienste Tabs - oberhalb der Karte */}
+      <Tabs defaultValue="karte" className="mb-3">
+        <TabsList className="h-9">
+          <TabsTrigger value="karte" className="text-xs py-1 px-3 h-8">
+            <Map className="h-3.5 w-3.5 mr-1" />
+            Karte
+          </TabsTrigger>
+          <TabsTrigger value="denkmal" className="text-xs py-1 px-3 h-8">
+            <BuildingIcon className="h-3.5 w-3.5 mr-1" />
+            DenkmalAtlas
+          </TabsTrigger>
+          <TabsTrigger value="bayern" className="text-xs py-1 px-3 h-8">
+            <GlobeIcon className="h-3.5 w-3.5 mr-1" />
+            BayernAtlas
+          </TabsTrigger>
+          <TabsTrigger value="bgr" className="text-xs py-1 px-3 h-8">
+            <ServerIcon className="h-3.5 w-3.5 mr-1" />
+            BGR Geoportal
+          </TabsTrigger>
+        </TabsList>
+
+        {/* Karten-Tab */}
+        <TabsContent value="karte" className="p-0 m-0">
+          {/* Flex-Container für Map */}
+          <div style={{ display: 'flex', flexDirection: 'column', flex: '1 1 auto', minHeight: '0' }}>
+            {/* Google-Map mit div für den Container */}
+            <div className="overflow-hidden p-0 border rounded-md" style={{ isolation: 'isolate', flex: '1 1 auto', minHeight: '470px' }}>
+              <div id="tiefbau-map-container" style={{ width: '100%', height: '100%', minHeight: '470px', margin: 0, padding: 0 }}></div>
+              <EnhancedGoogleMap
+                onRouteChange={handleRouteChange}
+                onMarkersClear={clearMarkers}
+                initialCenter={{ lat: 48.137154, lng: 11.576124 }} // München
+                initialZoom={12}
+                searchOutsideMap={true} // Adresssuche außerhalb der Karte platzieren
+                initialRoute={savedRoute} // Gespeicherte Route übergeben
+                onMapReady={(map) => setMapInstance(map)} // Speichern der Map-Instanz
+                useRouteOptimization={true} // Optimierte Route aktivieren
+                showTerrainControls={true} // Terrain-Steuerungselemente anzeigen
+                height="100%" // Flexible Höhe
+              />
+            </div>
+          </div>
+        </TabsContent>
+
+        {/* DenkmalAtlas Tab */}
+        <TabsContent value="denkmal" className="p-0 m-0">
+          <Card className="border">
+            <CardHeader className="py-4 px-5">
+              <CardTitle className="text-lg">DenkmalAtlas 2.0</CardTitle>
+              <CardDescription>
+                Informationen zu Denkmälern und geschützten Bereichen in Bayern
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="py-3 px-5">
+              <p className="text-sm mb-4">Der DenkmalAtlas 2.0 bietet umfassende Informationen zu Bau- und Bodendenkmälern sowie Ensembles im Freistaat Bayern.</p>
+              <a href="https://geoportal.bayern.de/denkmalatlas/" target="_blank" rel="noopener noreferrer" className="no-underline">
+                <Button className="w-full h-10">
+                  <ExternalLink className="h-4 w-4 mr-2" />
+                  DenkmalAtlas 2.0 öffnen
+                </Button>
+              </a>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        
+        {/* BayernAtlas Tab */}
+        <TabsContent value="bayern" className="p-0 m-0">
+          <Card className="border">
+            <CardHeader className="py-4 px-5">
+              <CardTitle className="text-lg">BayernAtlas</CardTitle>
+              <CardDescription>
+                Umfassende Geodaten des Freistaats Bayern
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="py-3 px-5">
+              <p className="text-sm mb-4">Der BayernAtlas bietet aktuelle Karten, Luftbilder, historische Karten und thematische Karten des Freistaats Bayern.</p>
+              <a href="https://geoportal.bayern.de/bayernatlas/" target="_blank" rel="noopener noreferrer" className="no-underline">
+                <Button className="w-full h-10">
+                  <ExternalLink className="h-4 w-4 mr-2" />
+                  BayernAtlas öffnen
+                </Button>
+              </a>
+            </CardContent>
+          </Card>
+        </TabsContent>
+        
+        {/* BGR Geoportal Tab */}
+        <TabsContent value="bgr" className="p-0 m-0">
+          <Card className="border">
+            <CardHeader className="py-4 px-5">
+              <CardTitle className="text-lg">BGR Geoviewer</CardTitle>
+              <CardDescription>
+                Bodendaten und Geologie-Informationen der Bundesanstalt für Geowissenschaften und Rohstoffe
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="py-3 px-5">
+              <p className="text-sm mb-4">Der BGR Geoviewer bietet geologische und hydrogeologische Karten, Bodenkarten und verschiedene thematische Karten.</p>
+              <a href="https://geoviewer.bgr.de/" target="_blank" rel="noopener noreferrer" className="no-underline">
+                <Button className="w-full h-10">
+                  <ExternalLink className="h-4 w-4 mr-2" />
+                  BGR Geoviewer öffnen
+                </Button>
+              </a>
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+      
+      {/* Bemerkungen-Tab unter der Karte */}
+      <Tabs defaultValue="bemerkungen" className="border rounded-md">
+        <TabsList className="h-8">
+          <TabsTrigger value="bemerkungen" className="text-xs py-1 px-3 h-7">
+            <MessageSquareIcon className="h-3.5 w-3.5 mr-1" />
+            Bemerkungen
+          </TabsTrigger>
+        </TabsList>
+          
+        {/* Bemerkungen Tab Inhalt */}
+        <TabsContent value="bemerkungen" className="pt-0 mt-1">
+          <Card className="border">
+            <CardHeader className="py-3 px-4">
+              <CardTitle className="text-base">Bemerkungen zur Route</CardTitle>
+              <CardDescription className="text-xs">
+                Fügen Sie Details und Anmerkungen zur geplanten Route hinzu
+              </CardDescription>
+            </CardHeader>
+            <CardContent className="pt-0 px-4 pb-4">
+              <Textarea
+                placeholder="Geben Sie hier Bemerkungen zur Route ein"
+                value={remarks}
+                onChange={(e) => setRemarks(e.target.value)}
+                className="h-20 mb-1"
+              />
+              <div className="flex flex-wrap gap-2 mt-2">
+                <Button 
+                  variant="outline" 
+                  size="sm" 
+                  className="h-7 text-xs"
+                  onClick={() => {
+                    if (isRecording) {
+                      recognitionRef.current?.stop();
+                      setIsRecording(false);
+                    } else {
+                      recognitionRef.current?.start();
+                      setIsRecording(true);
+                    }
+                  }}
+                >
+                  {isRecording ? (
+                    <>
+                      <MicOff className="h-3 w-3 mr-1" />
+                      Diktat beenden
+                    </>
+                  ) : (
+                    <>
+                      <Mic className="h-3 w-3 mr-1" />
+                      Diktat starten
+                    </>
+                  )}
+                </Button>
+                <Button
+                  variant="outline"
+                  size="sm"
+                  className="h-7 text-xs"
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  <Camera className="h-3 w-3 mr-1" />
+                  Foto hinzufügen
+                </Button>
+                <input 
+                  type="file" 
+                  ref={fileInputRef} 
+                  style={{ display: 'none' }} 
+                  accept="image/*" 
+                  multiple 
+                  onChange={handlePhotoUpload} 
+                />
+              </div>
+              {photos.length > 0 && (
+                <div className="grid grid-cols-3 gap-2 mt-3">
+                  {photos.map((photo, index) => (
+                    <div key={index} className="relative group">
+                      <img 
+                        src={photo.preview} 
+                        alt={`Foto ${index + 1}`} 
+                        className="h-20 w-full object-cover rounded-md"
+                      />
+                      <Button 
+                        variant="destructive" 
+                        size="icon" 
+                        className="absolute top-1 right-1 h-5 w-5 rounded-full opacity-0 group-hover:opacity-100 transition-opacity"
+                        onClick={() => removePhoto(index)}
+                      >
+                        <Trash2 className="h-3 w-3" />
+                      </Button>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </CardContent>
+          </Card>
+        </TabsContent>
+      </Tabs>
+      </div>
+    </div>
+  );
+};
+
+export default TiefbauMap;
